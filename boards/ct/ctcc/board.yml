@@ -1,0 +1,7 @@
+board:
+  name: ctcc
+  socs:
+    - name: nrf52840
+    - name: nrf9161
+      variants:
+      - name: 'ns'

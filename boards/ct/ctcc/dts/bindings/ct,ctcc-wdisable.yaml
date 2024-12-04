@@ -1,0 +1,18 @@
+# Copyright (c) 2024 CTHINGS.CO
+# SPDX-License-Identifier: Apache-2.0
+
+description: GPIO used as input for radio control
+
+compatible: "ct,ctcc-wdisable"
+
+include: base.yaml
+
+properties:
+  status:
+    required: true
+
+  gpios:
+    type: phandle-array
+    required: true
+    description: |
+      GPIO to use as input to control enable/disable radio
