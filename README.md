@@ -7,7 +7,7 @@ For more information how to make the firmware production ready please reach out:
 
 ## Preparing development environment
 
-These instructions assume you know how to setup nrf-sdk (Zephyr RTOS) environment, for more information please see: https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/installation.html
+These instructions assume you know how to setup nrf-sdk (Zephyr RTOS) environment, for more information please see: https://docs.nordicsemi.com/bundle/ncs-latest/page/nrf/installation.html and Getting Started guide: https://docs.zephyrproject.org/latest/develop/getting_started/index.html
 
 On Linux machine:
 ```
@@ -24,18 +24,18 @@ west update
 
 Remove board files from the main Zephyr repository to avoid duplicates with this repository:
 ```
-rm -rf ../zephyr/boards/ct/ctcc
+rm -rf zephyr/boards/ct/ctcc
 ```
 
 
 Copy `pm_static.yml` and `sysbuild` files to configure your application to be compatible with the Open Bootloader:
 ```
-cp -r boards/ct/ctcc/nrf-sdk/<soc>/* firmware/
+cp -r ctcc-nrf-reference-software/boards/ct/ctcc/nrf-sdk/<soc>/* ctcc-nrf-reference-software/firmware/
 ```
 
 Build example firmware (nrf52840):
 ```
-cd firmware
+cd ctcc-nrf-reference-software/firmware
 ```
 
 ```
@@ -61,7 +61,7 @@ Loading firmware procedure:
 * See if the image has been loaded (there should be one image on the list): `mcumgr --conntype serial --connstring "/dev/ttyACM0,baud=115200" image list`
 * Reboot the device to boot into image: `mcumgr --conntype serial --connstring "/dev/ttyACM0,baud=115200" reset`
  
-After rebooting, the device will enter Bootloader again, wait 5 seconds and then it should boot the loaded firmware.
+After rebooting, the device will enter Bootloader again, wait 5 seconds and then it should boot the loaded firmware. To check the result, try to connect to the console e.g. using `picocom`: `sudo picocom -b 115000 /dev/ttyACM0`.
 
 If you want to flash whole bootloader + image through e.g. external debugger, please install `nrfjprog` (https://docs.nordicsemi.com/bundle/ug_gsg_ses/page/UG/gsg/install_nrf_command_line_tools.html). Run following commands:
 
