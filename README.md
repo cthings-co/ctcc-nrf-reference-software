@@ -56,10 +56,10 @@ for more details about `smpmgr` please reach out to: https://github.com/intercre
 Loading firmware procedure:
 
 * By default Open Bootloader waits for 5 seconds for any prompt from `smpmgr` then it proceeds to load firmware image
-* Upon powering up the device (or after a reset) issue: `smpmgr --mtu 128 --port /dev/ttyACM0 image state-read`, to get a list of available images (on factory defult the list should be empty). This command will also stop the Bootloader from booting further
-* To load produced firmware: `smpmgr --mtu 128 --port /dev/ttyACM0 image upload build/firmware/zephyr/zephyr.signed.bin`
-* See if the image has been loaded (there should be one image on the list): `smpmgr --mtu 128 --port /dev/ttyACM0 image state-read`
-* Reboot the device to boot into image: `smpmgr --mtu 128 --port /dev/ttyACM0 os reset`
+* Upon powering up the device (or after a reset) issue: `smpmgr --mtu 132 --port /dev/ttyACM0 image state-read`, to get a list of available images (on factory defult the list should be empty). This command will also stop the Bootloader from booting further
+* To load produced firmware: `smpmgr --mtu 132 --port /dev/ttyACM0 image upload build/firmware/zephyr/zephyr.signed.bin`
+* See if the image has been loaded (there should be one image on the list): `smpmgr --mtu 132 --port /dev/ttyACM0 image state-read`
+* Reboot the device to boot into image: `smpmgr --mtu 132 --port /dev/ttyACM0 os reset`
  
 After rebooting, the device will enter Bootloader again, wait 5 seconds and then it should boot the loaded firmware. To check the result, try to connect to the console e.g. using `picocom`: `sudo picocom -b 115000 /dev/ttyACM0`.
 
