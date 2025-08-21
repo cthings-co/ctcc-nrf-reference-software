@@ -1,15 +1,21 @@
-# Copyright (c) 2024 CTHINGS.CO
+# Copyright (c) 2025 CTHINGS.CO
 # SPDX-License-Identifier: Apache-2.0
+#
+# Config options for CTCC Reference Software
 
-mainmenu "Reference Software"
+mainmenu "Connectivity Cards Reference Software"
 
-# Place your configs here
+config FIRMWARE_REV
+	string "Firmware revision"
+	default "1.1.0"
+	help
+	  Firmware built-in revision (should be set properly in prj.conf).
 
 config MCUBOOT_IMGTOOL_SIGN_VERSION
 	string "Firmware revision"
-	default "0.0.1"
+	default "1.1.0"
 	help
-	  MCUboot built-in revision
+	  MCUboot built-in revision (ideally should be the same as FIRMWARE_REV).
 
 config OUTPUT_DISASSEMBLY
 	bool "Enable .lst generation"

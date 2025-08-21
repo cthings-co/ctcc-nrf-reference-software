@@ -1,0 +1,9 @@
+/*
+ * Copyright (c) 2025 CTHINGS.CO
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+&mx25r6435 {
+	status = "okay";
+};
