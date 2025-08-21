@@ -1,0 +1,29 @@
+From b4a8106a3e9c42cc18c6c9d178963cffe2058c3d Mon Sep 17 00:00:00 2001
+From: Jan Kowalewski <jkowalewski@cthings.co>
+Date: Wed, 4 Dec 2024 16:47:37 +0100
+Subject: [PATCH] kernel: banner: add custom CTHINGS.CO banner
+
+Signed-off-by: Jan Kowalewski <jkowalewski@cthings.co>
+---
+ kernel/banner.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/kernel/banner.c b/kernel/banner.c
+index a16784cb975..a112e3b4384 100644
+--- a/kernel/banner.c
++++ b/kernel/banner.c
+@@ -43,6 +43,10 @@ __weak void boot_banner(void)
+ #endif /* CONFIG_BOOT_CLEAR_SCREEN */
+ 
+ #ifdef CONFIG_BOOT_BANNER
+-	printk("*** " CONFIG_BOOT_BANNER_STRING " " BANNER_VERSION BANNER_POSTFIX " ***\n");
++#ifdef CONFIG_FIRMWARE_REV
++	printk("*** Firmware revision: " CONFIG_FIRMWARE_REV " ***\n\nCTHINGS.CO®\n\nThe programs included with the Zephyr® RTOS system are free software;\nthe exact distribution terms for each software/library are described in the\nindividual copyrights files according to the Zephyr® west manifest.\n\nZephyr® RTOS comes with ABSOLUTELY NO WARRANTY, to the extent\npermitted by applicable law.\n\n   ____ _____ _   _ ___ _   _  ____ ____   ____ ___\n  / ___|_   _| | | |_ _| \\ | |/ ___/ ___| / ___/ _ \\ \n | |     | | | |_| || ||  \\| | |  _\\___ \\| |  | | | |\n | |___  | | |  _  || || |\\  | |_| |___) | |__| |_| |\n  \\____| |_| |_| |_|___|_| \\_|\\____|____(_)____\\___/\n\n");
++#else
++	printk("*** " CONFIG_BOOT_BANNER_STRING " " BANNER_VERSION " " BANNER_POSTFIX " ***\n\nCTHINGS.CO®\n\nThe programs included with the Zephyr® RTOS system are free software;\nthe exact distribution terms for each software/library are described in the\nindividual copyrights files according to the Zephyr® west manifest.\n\nZephyr® RTOS comes with ABSOLUTELY NO WARRANTY, to the extent\npermitted by applicable law.\n\n   ____ _____ _   _ ___ _   _  ____ ____   ____ ___\n  / ___|_   _| | | |_ _| \\ | |/ ___/ ___| / ___/ _ \\ \n | |     | | | |_| || ||  \\| | |  _\\___ \\| |  | | | |\n | |___  | | |  _  || || |\\  | |_| |___) | |__| |_| |\n  \\____| |_| |_| |_|___|_| \\_|\\____|____(_)____\\___/\n\n");
++#endif /* CONFIG_FIRMWARE_REV */
+ #endif /* CONFIG_BOOT_BANNER */
+ }
+-- 
+2.47.0
+

@@ -1,0 +1,138 @@
+name: CTCC Firmwares CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [created]
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  ARTIFACT_PATH: ${{ github.workspace }}/artifacts
+  CTCC_BOARD: ${{ github.workspace }}/boards/ct/ctcc
+  CTCC_SDK_CONFIGS: ${{ github.workspace }}/boards/ct/ctcc/nrf-sdk
+  ZEPHYR_REPO: ${{ github.workspace }}/../zephyr
+  NRF_REPO: ${{ github.workspace }}/../nrf
+  BOOTLOADER_PATH: ${{ github.workspace }}/../bootloader/mcuboot
+
+jobs:
+  build-matrix:
+    env:
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-0.17.0
+    runs-on: [self-hosted, linux, x64]
+    container:
+      image: zephyrprojectrtos/ci:v0.27.5
+
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { name: nrf52840-open-bootloader,  BRD: ctcc, SOC: nrf52840, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: false, IFACE: usb }
+          - { name: nrf52840-assembly-tests,  BRD: ctcc, SOC: nrf52840, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: false, IFACE: usb }
+          - { name: nrf52840-firmware,  BRD: ctcc, SOC: nrf52840, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: false, IFACE: usb }
+          - { name: nrf9161-open-bootloader,   BRD: ctcc, SOC: nrf9161, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: true, IFACE: uart }
+          - { name: nrf9161-assembly-tests,   BRD: ctcc, SOC: nrf9161, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: true, IFACE: uart }
+          - { name: nrf9161-firmware,   BRD: ctcc, SOC: nrf9161, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: true, IFACE: uart }
+          - { name: nrf9151-open-bootloader,   BRD: ctcc, SOC: nrf9151, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: true, IFACE: uart }
+          - { name: nrf9151-assembly-tests,   BRD: ctcc, SOC: nrf9151, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: true, IFACE: uart }
+          - { name: nrf9151-firmware,   BRD: ctcc, SOC: nrf9151, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: true, IFACE: uart }
+
+    name: Build ${{ matrix.config.name }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install certificates
+        shell: bash
+        run: |
+          apt update
+          apt install -y ca-certificates
+          update-ca-certificates --fresh || true
+
+      - name: Prepare NRF SDK
+        shell: bash
+        run: |
+          west init -l || true
+          west update --narrow -o=--depth=1
+
+          cd $ZEPHYR_REPO
+          git apply $GITHUB_WORKSPACE/patches/zephyr/0001-kernel-banner-add-custom-CTHINGS.CO-banner.patch || true
+          source $ZEPHYR_REPO/zephyr-env.sh
+
+          rm -rf $ZEPHYR_REPO/boards/ct/ctcc || true
+
+      - name: Build firmware
+        shell: bash
+        run: |
+          export BRD=${{ matrix.config.BRD }}
+          export SOC=${{ matrix.config.SOC }}
+          export APP_NAME=${{ matrix.config.APP_NAME }}
+          export BUILD_OPTS="${{ matrix.config.BUILD_OPTS }}"
+          export NS=${{ matrix.config.NS || 'false' }}
+          export APP_PATH=$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}
+          export BUILD_TYPE=${{ matrix.config.BUILD_TYPE }}
+          export IFACE=${{ matrix.config.IFACE }}
+
+          cd $APP_PATH
+          bash $GITHUB_WORKSPACE/.ci_scripts/build_sdk.sh
+
+      - name: Collect Artifacts
+        shell: bash
+        run: |
+          export APP_PATH=$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}
+          mkdir -p $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}
+
+          if [ "${{ matrix.config.BUILD_TYPE }}" = "bootloader" ]; then mv $APP_PATH/build/mcuboot/zephyr/zephyr.elf $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.elf
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.bin
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.hex
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.lst
+          elif [ "${{ matrix.config.BUILD_TYPE }}" = "firmware" ]; then
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.signed.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.signed.bin || true
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst || true
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.hex || true
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.lst || true
+            mv $APP_PATH/build/merged.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.merged.hex || true
+          else
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.elf $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.elf
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.bin
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.hex
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.config.name }}
+          path: ${{ env.ARTIFACT_PATH }}/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}
+
+  package:
+    needs: build-matrix
+    runs-on: [self-hosted, linux, x64]
+    name: Package Firmware Artifacts
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all_artifacts
+
+      - name: Zip all artifacts
+        shell: bash
+        run: |
+          PKG_NAME="ctcc-firmwares-${{ github.sha }}"
+          if [[ "${{ github.event_name }}" == "release" ]]; then
+            PKG_NAME="ctcc-firmwares-${{ github.ref_name }}"
+          fi
+          cd all_artifacts
+          zip -r $PKG_NAME.zip *
+          mv $PKG_NAME.zip ../
+
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-package
+          path: ${{ github.workspace }}/*.zip
