@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
   release:
-    types: [created]
+    types: [published]
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -113,13 +113,16 @@ jobs:
     needs: build-matrix
     runs-on: [self-hosted, linux, x64]
     name: Package Firmware Artifacts
-
+  
+    permissions:
+      contents: write
+  
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           path: all_artifacts
-
+  
       - name: Zip all artifacts
         shell: bash
         run: |
@@ -130,9 +133,18 @@ jobs:
           cd all_artifacts
           zip -r $PKG_NAME.zip *
           mv $PKG_NAME.zip ../
-
-      - name: Upload final package
+          echo "PKG_NAME=$PKG_NAME" >> $GITHUB_ENV
+  
+      - name: Upload final package (artifact)
         uses: actions/upload-artifact@v4
         with:
           name: firmware-package
           path: ${{ github.workspace }}/*.zip
+  
+      - name: Upload to GitHub Release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.PKG_NAME }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
