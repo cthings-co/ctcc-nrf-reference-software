@@ -6,7 +6,7 @@ on:
   pull_request:
   workflow_dispatch:
   release:
-    types: [created]
+    types: [published]
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -130,9 +130,21 @@ jobs:
           cd all_artifacts
           zip -r $PKG_NAME.zip *
           mv $PKG_NAME.zip ../
+          echo "PKG_NAME=$PKG_NAME" >> $GITHUB_ENV
 
       - name: Upload final package
         uses: actions/upload-artifact@v4
         with:
           name: firmware-package
           path: ${{ github.workspace }}/*.zip
+
+
+      - name: Upload to GitHub Release
+          if: github.event_name == 'release'
+          uses: actions/upload-release-asset@v1
+          with:
+            upload_url: ${{ github.event.release.upload_url }}
+            asset_path: ${{ env.PKG_NAME }}.zip
+            asset_name: ${{ env.PKG_NAME }}.zip
+            asset_content_type: application/zip
+
