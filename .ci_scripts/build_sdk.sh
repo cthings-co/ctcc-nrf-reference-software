@@ -8,9 +8,6 @@ if [ $IFACE = "usb" ]; then
 fi
 
 if [ $BUILD_TYPE = "firmware" ] || [ $BUILD_TYPE = "bootloader" ]; then
-  # Use open root-ec-p256.pem key
-  echo "SB_CONFIG_BOOT_SIGNATURE_KEY_FILE=\"${BOOTLOADER_PATH}/root-ec-p256.pem\"" >> sysbuild.conf
-
   # Copy SoC configs
   cp -a ${CTCC_SDK_CONFIGS}/${SOC}/* .
 fi

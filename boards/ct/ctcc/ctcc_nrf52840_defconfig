@@ -26,3 +26,4 @@ CONFIG_BOOT_BANNER_STRING=""
 
 # Lock firmware by default
 CONFIG_NRF_APPROTECT_LOCK=y
+
