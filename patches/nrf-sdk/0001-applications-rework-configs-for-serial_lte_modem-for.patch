@@ -1,17 +1,66 @@
-From a67b13263c5c3daabd14fea7efad8b09c7e8e210 Mon Sep 17 00:00:00 2001
+From 83d57e59e313aec2291fb5be5537dbd80cf5b629 Mon Sep 17 00:00:00 2001
 From: Jan Kowalewski <jkowalewski@cthings.co>
 Date: Tue, 10 Jun 2025 11:44:09 +0200
 Subject: [PATCH] applications: rework configs for serial_lte_modem for
- ctcc/nrf9161
+ ctcc/nrf9161 and ctcc/nrf9151
 
-Signed-off-by: Jan Kowalewski <jkowalewski@cthings.co>
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
 ---
+ .../boards/ctcc_nrf9151_ns.conf               | 12 +++++++++++
+ .../boards/ctcc_nrf9151_ns.overlay            | 21 +++++++++++++++++++
  .../boards/ctcc_nrf9161_ns.conf               | 12 +++++++++++
  .../boards/ctcc_nrf9161_ns.overlay            | 21 +++++++++++++++++++
- 2 files changed, 33 insertions(+)
+ 4 files changed, 66 insertions(+)
+ create mode 100644 applications/serial_lte_modem/boards/ctcc_nrf9151_ns.conf
+ create mode 100644 applications/serial_lte_modem/boards/ctcc_nrf9151_ns.overlay
  create mode 100644 applications/serial_lte_modem/boards/ctcc_nrf9161_ns.conf
  create mode 100644 applications/serial_lte_modem/boards/ctcc_nrf9161_ns.overlay
 
+diff --git a/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.conf b/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.conf
+new file mode 100644
+index 0000000000..b9b88293a4
+--- /dev/null
++++ b/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.conf
+@@ -0,0 +1,12 @@
++#
++# Copyright (c) 2024 CTHINGS.CO
++#
++# SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
++#
++
++# Use UART_0 (when working with PC terminal)
++# unmask the following config
++CONFIG_UART_0_NRF_HW_ASYNC_TIMER=2
++CONFIG_UART_0_NRF_HW_ASYNC=y
++CONFIG_SLM_POWER_PIN=2
++# CONFIG_SLM_INDICATE_PIN not available
+diff --git a/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.overlay b/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.overlay
+new file mode 100644
+index 0000000000..9da78ddc32
+--- /dev/null
++++ b/applications/serial_lte_modem/boards/ctcc_nrf9151_ns.overlay
+@@ -0,0 +1,21 @@
++/*
++ * Copyright (c) 2024 CTHINGS.CO
++ *
++ * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
++ */
++
++/ {
++	chosen {
++		ncs,slm-uart = &uart0;
++	};
++};
++
++&uart0 {
++	status = "okay";
++	current-speed = <19200>;
++};
++
++/* Enable external flash */
++&mx25r6435 {
++	status = "okay";
++};
 diff --git a/applications/serial_lte_modem/boards/ctcc_nrf9161_ns.conf b/applications/serial_lte_modem/boards/ctcc_nrf9161_ns.conf
 new file mode 100644
 index 0000000000..b9b88293a4
@@ -58,5 +107,5 @@ index 0000000000..9da78ddc32
 +	status = "okay";
 +};
 -- 
-2.47.0
+2.43.0
 
