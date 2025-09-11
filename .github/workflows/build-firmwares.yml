@@ -92,15 +92,16 @@ jobs:
             mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.lst
           elif [ "${{ matrix.config.BUILD_TYPE }}" = "firmware" ]; then
             mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.signed.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.signed.bin || true
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst || true
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.hex || true
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.lst || true
+            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.hex
+            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.lst
             mv $APP_PATH/build/merged.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.merged.hex || true
           else
             mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.elf $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.elf
             mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.bin
             mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.hex
             mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst
+            mv $APP_PATH/build/merged.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.merged.hex || true
           fi
 
       - name: Upload build artifacts
