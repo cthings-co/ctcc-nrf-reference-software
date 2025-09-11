@@ -32,7 +32,7 @@ jobs:
         config:
           - { name: nrf52840-open-bootloader,  BRD: ctcc, SOC: nrf52840, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: false, IFACE: usb }
           - { name: nrf52840-assembly-tests,  BRD: ctcc, SOC: nrf52840, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: false, IFACE: usb }
-          - { name: nrf52840-firmware,  BRD: ctcc, SOC: nrf52840, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: false, IFACE: usb }
+          - { name: nrf52840-firmware,  BRD: ctcc, SOC: nrf52840, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: false, IFACE: usb, BUILD_OPTS: -DCONFIG_USB_DEVICE_PID=0xF00F }
           - { name: nrf9161-open-bootloader,   BRD: ctcc, SOC: nrf9161, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: true, IFACE: uart }
           - { name: nrf9161-assembly-tests,   BRD: ctcc, SOC: nrf9161, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: true, IFACE: uart }
           - { name: nrf9161-firmware,   BRD: ctcc, SOC: nrf9161, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: true, IFACE: uart }
