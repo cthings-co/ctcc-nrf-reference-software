@@ -8,144 +8,676 @@ on:
   release:
     types: [published]
 
+concurrency:
+  group: ctcc-firmwares-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege by default: builds only need to read the repo. The single job
+# that needs to write (package -> GitHub Release) elevates its own permissions.
+permissions:
+  contents: read
+
 env:
-  DEBIAN_FRONTEND: noninteractive
   ARTIFACT_PATH: ${{ github.workspace }}/artifacts
-  CTCC_BOARD: ${{ github.workspace }}/boards/ct/ctcc
-  CTCC_SDK_CONFIGS: ${{ github.workspace }}/boards/ct/ctcc/nrf-sdk
   ZEPHYR_REPO: ${{ github.workspace }}/../zephyr
   NRF_REPO: ${{ github.workspace }}/../nrf
-  BOOTLOADER_PATH: ${{ github.workspace }}/../bootloader/mcuboot
+  # NCS v3.4 / Zephyr 4.4 require Zephyr SDK 1.0.1 (see zephyr/SDK_VERSION), and the
+  # image is pinned because it is what supplies that SDK. Do not drop below v0.29.1:
+  # v0.29.0 bundled 1.0.0 and v0.28.x bundled 0.17.4, both of which this Zephyr
+  # rejects. v0.29.1 through v0.29.3 all bundle 1.0.1 at the same path
+  # (docker-image Dockerfile.ci, ARG ZSDK_VERSION), so moving inside that range needs
+  # no change to ZEPHYR_SDK_INSTALL_DIR below.
+  ZEPHYR_CI_IMAGE: zephyrprojectrtos/ci:v0.29.3
 
 jobs:
-  build-matrix:
-    env:
-      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
-      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-0.17.0
-    runs-on: [self-hosted, linux, x64]
-    container:
-      image: zephyrprojectrtos/ci:v0.27.5
-
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - { name: nrf52840-open-bootloader,  BRD: ctcc, SOC: nrf52840, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: false, IFACE: usb }
-          - { name: nrf52840-assembly-tests,  BRD: ctcc, SOC: nrf52840, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: false, IFACE: usb }
-          - { name: nrf52840-firmware,  BRD: ctcc, SOC: nrf52840, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: false, IFACE: usb, BUILD_OPTS: -DCONFIG_USB_DEVICE_PID=0xF00F }
-          - { name: nrf9161-open-bootloader,   BRD: ctcc, SOC: nrf9161, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: true, IFACE: uart }
-          - { name: nrf9161-assembly-tests,   BRD: ctcc, SOC: nrf9161, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: true, IFACE: uart }
-          - { name: nrf9161-firmware,   BRD: ctcc, SOC: nrf9161, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: true, IFACE: uart }
-          - { name: nrf9151-open-bootloader,   BRD: ctcc, SOC: nrf9151, APP_NAME: blinky, APP_PATH: ../zephyr/samples/basic/blinky, BUILD_TYPE: bootloader, NS: true, IFACE: uart }
-          - { name: nrf9151-assembly-tests,   BRD: ctcc, SOC: nrf9151, APP_NAME: assembly, APP_PATH: tests/assembly, BUILD_TYPE: test, NS: true, IFACE: uart }
-          - { name: nrf9151-firmware,   BRD: ctcc, SOC: nrf9151, APP_NAME: firmware, APP_PATH: firmware, BUILD_TYPE: firmware, NS: true, IFACE: uart }
-
-    name: Build ${{ matrix.config.name }}
+  # firmware/VERSION is the single source of truth for both the boot banner
+  # (APP_VERSION_STRING) and the MCUboot image-header version
+  # (CONFIG_MCUBOOT_IMGTOOL_SIGN_VERSION), so a pull request that changes an image
+  # without bumping it publishes something indistinguishable from an earlier build.
+  # Runs on a GitHub-hosted runner: it needs no toolchain, and unlike the build
+  # matrix it must also run for pull requests from forks.
+  version-bump-check:
+    name: VERSION bump
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history so the pull request's base revision is reachable.
+          fetch-depth: 0
 
-      - name: Install certificates
+      - name: Diff firmware/VERSION against the base revision
+        shell: bash
+        # Through env: rather than interpolated into the script body - these are
+        # GitHub-supplied SHAs so the risk is remote, but keeping every `github.*`
+        # value out of the shell source removes the injection class rather than
+        # arguing about which fields are safe.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euxo pipefail
+          BASE="$BASE_SHA"
+
+          # Fail loudly if the base revision is not usable. Everything below decides
+          # whether to SKIP the gate, so a git error must never be mistaken for "this
+          # pull request changes nothing" - that would silently disable the check.
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::error::base revision $BASE is not available; cannot verify the VERSION bump"
+            exit 1
+          fi
+
+          # Only a change that can alter a built image needs a version bump; a
+          # documentation-only pull request is not blocked. firmware/VERSION itself
+          # lives under firmware/, so bumping it alone still runs the check. .github
+          # is in the list because the workflow decides how every image is built.
+          # Assigned first (not piped into grep) so a git failure trips set -e rather
+          # than reading as an empty diff.
+          #
+          # Two refinements to what counts as build-affecting, both of which used to
+          # produce a required bump for a change that cannot alter a single byte of a
+          # shipped image:
+          #   - Markdown and LICENSE are excluded even inside the watched trees. A
+          #     README under firmware/ is documentation wherever it sits.
+          #   - `-w` ignores whitespace, so a re-indentation or a trailing-newline fix
+          #     drops out. Note `--numstat` rather than `--name-only`: with `-w`,
+          #     `--name-only` still lists a file whose only change is whitespace
+          #     (checked on git 2.43), while `--numstat` omits it - which is the
+          #     behaviour wanted here.
+          # A comment-only edit to a real build input still requires a bump. That is
+          # deliberate rather than an oversight: deciding what is "only a comment"
+          # across .conf, .dts, .c, .py and .yml needs a parser per language, and the
+          # failure mode of getting it wrong is shipping two different images under
+          # one version - the exact thing this gate exists to stop.
+          changed="$(git diff -w --numstat "$BASE" -- \
+                       firmware drivers dts patches tests .ci_scripts .github \
+                       Kconfig CMakeLists.txt zephyr/module.yml west.yml \
+                       ':(exclude)**/*.md' ':(exclude)LICENSE')"
+          if [ -z "$changed" ]; then
+            echo "No build-affecting change in this pull request; VERSION bump not required."
+            echo "SKIP_VERSION_CHECK=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # -U99 so the whole 5-line file lands in the diff. With git's default three
+          # lines of context, a change to the first or last key drops one of the
+          # others and the gate could not recognise the file at all.
+          git diff -U99 "$BASE" -- firmware/VERSION > version_compare.diff
+          cat version_compare.diff
+
+      - name: Require a VERSION bump
+        if: env.SKIP_VERSION_CHECK != '1'
+        shell: bash
+        run: python3 .ci_scripts/check_version_bump.py
+
+  # Developer Certificate of Origin: every commit in a pull request must carry a
+  # Signed-off-by trailer naming its author (see CONTRIBUTING.md). Implemented with
+  # plain git rather than a third-party action so nothing extra runs with the
+  # repository token.
+  dco-check:
+    name: DCO sign-off
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          # Full history so both ends of the pull request range are reachable.
+          fetch-depth: 0
+
+      - name: Check every commit for a matching Signed-off-by
+        shell: bash
+        # See the note on the VERSION gate: no `github.*` value is interpolated into
+        # a shell body anywhere in this workflow.
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BASE="$BASE_SHA"
+          HEAD="$HEAD_SHA"
+
+          # Materialise the commit list first and require it to be non-empty. Feeding
+          # the loop straight from a process substitution meant an unusable range (or
+          # a git failure, whose status a process substitution does not report) ran
+          # the loop body zero times and reported success without inspecting a single
+          # commit.
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null || ! git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            echo "::error::pull request range $BASE..$HEAD is not available; cannot verify sign-offs"
+            exit 1
+          fi
+          mapfile -t commits < <(git rev-list --no-merges "$BASE..$HEAD")
+          if [ "${#commits[@]}" -eq 0 ]; then
+            echo "::error::no commits found in $BASE..$HEAD; refusing to pass the DCO check vacuously"
+            exit 1
+          fi
+
+          failed=0
+          for sha in "${commits[@]}"; do
+            [ -n "$sha" ] || continue
+            subject="$(git show -s --format='%s' "$sha")"
+            mapfile -t signoffs < <(git show -s --format='%B' "$sha" \
+              | sed -nE 's/^[Ss]igned-off-by:[[:space:]]*(.+)$/\1/p')
+
+            if [ "${#signoffs[@]}" -eq 0 ]; then
+              echo "::error::$sha (\"$subject\") has no Signed-off-by trailer"
+              failed=1
+              continue
+            fi
+
+            # The sign-off must belong to the person submitting the work, so accept
+            # a trailer matching either the author or the committer address.
+            author="$(git show -s --format='%ae' "$sha")"
+            committer="$(git show -s --format='%ce' "$sha")"
+            matched=0
+            for s in "${signoffs[@]}"; do
+              addr="$(printf '%s' "$s" | sed -nE 's/.*<(.+)>.*/\1/p')"
+              shopt -s nocasematch
+              if [[ "$addr" == "$author" || "$addr" == "$committer" ]]; then
+                matched=1
+              fi
+              shopt -u nocasematch
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::$sha (\"$subject\") is signed off by ${signoffs[*]}," \
+                   "which matches neither the author ($author) nor the committer ($committer)"
+              failed=1
+            fi
+          done
+
+          echo "Checked ${#commits[@]} commit(s) for a matching Signed-off-by."
+          [ "$failed" -eq 0 ]
+
+  build-matrix:
+    name: Build ${{ matrix.config.name }}
+    runs-on: [self-hosted, linux, x64]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+
+    strategy:
+      fail-fast: false
+      # You are sharing a single west workspace (../zephyr, ../modules, etc.)
+      # across matrix builds. Running them in parallel will corrupt that workspace.
+      max-parallel: 1
+      matrix:
+        config:
+          - { name: nrf52840-open-bootloader, BRD: ctcc, SOC: nrf52840, APP_NAME: open_bootloader, APP_PATH: firmware, BUILD_TYPE: bootloader, NS: false }
+          - { name: nrf52840-assembly-tests, BRD: ctcc, SOC: nrf52840, APP_NAME: assembly, APP_PATH: tests/assembly,               BUILD_TYPE: test,       NS: false }
+          - { name: nrf52840-firmware,       BRD: ctcc, SOC: nrf52840, APP_NAME: firmware, APP_PATH: firmware,                     BUILD_TYPE: firmware,   NS: false }
+
+          - { name: nrf9161-open-bootloader, BRD: ctcc, SOC: nrf9161,  APP_NAME: open_bootloader, APP_PATH: firmware, BUILD_TYPE: bootloader, NS: true }
+          - { name: nrf9161-assembly-tests,  BRD: ctcc, SOC: nrf9161,  APP_NAME: assembly, APP_PATH: tests/assembly,               BUILD_TYPE: test,       NS: true }
+          - { name: nrf9161-firmware,        BRD: ctcc, SOC: nrf9161,  APP_NAME: firmware, APP_PATH: firmware,                     BUILD_TYPE: firmware,   NS: true }
+
+          - { name: nrf9151-open-bootloader, BRD: ctcc, SOC: nrf9151,  APP_NAME: open_bootloader, APP_PATH: firmware, BUILD_TYPE: bootloader, NS: true }
+          - { name: nrf9151-assembly-tests,  BRD: ctcc, SOC: nrf9151,  APP_NAME: assembly, APP_PATH: tests/assembly,               BUILD_TYPE: test,       NS: true }
+          - { name: nrf9151-firmware,        BRD: ctcc, SOC: nrf9151,  APP_NAME: firmware, APP_PATH: firmware,                     BUILD_TYPE: firmware,   NS: true }
+
+    env:
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+      ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-1.0.1
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          clean: true
+          fetch-depth: 1
+
+      - name: Prepare Zephyr SDK / west workspace (container, root, no shallow)
         shell: bash
         run: |
-          apt update
-          apt install -y ca-certificates
-          update-ca-certificates --fresh || true
+          set -euxo pipefail
 
-      - name: Prepare NRF SDK
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          CONTAINER_HOME="$WORKSPACE_ROOT/.container-home"
+          mkdir -p "$CONTAINER_HOME"
+
+          # Reclaim disk before pulling the (large) CI image - but only when disk is
+          # actually short. `docker image prune -f` and the rmi sweep act on the whole
+          # daemon, and on a self-hosted runner that daemon is shared with every other
+          # job on the machine: run unconditionally, they deleted other workloads'
+          # dangling layers and cached images on every build, to guard against a
+          # disk-exhaustion case that usually was not happening. Gate on free space so
+          # the protection stays for the case it was written for.
+          avail_gb="$(df -BG --output=avail /var/lib/docker 2>/dev/null | tail -1 | tr -dc '0-9')"
+          if [ -z "$avail_gb" ]; then
+            avail_gb="$(df -BG /var/lib/docker 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')"
+          fi
+          if [ -n "$avail_gb" ] && [ "$avail_gb" -lt 30 ]; then
+            echo "::notice::${avail_gb}G free under /var/lib/docker; reclaiming space"
+            docker image prune -f || true
+            docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep '^zephyrprojectrtos/ci:' | grep -vx "$ZEPHYR_CI_IMAGE" \
+              | xargs -r docker rmi || true
+          else
+            echo "${avail_gb:-unknown}G free under /var/lib/docker; skipping image cleanup"
+          fi
+          df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+
+          # Always pull. ZEPHYR_CI_IMAGE is a MUTABLE tag, and the previous
+          # `docker image inspect || pull` short-circuit meant that once a runner had
+          # the tag cached it never looked again - so the actual compiler was whatever
+          # that runner happened to cache first, which can differ from what the tag
+          # resolves to today and can differ between runners, silently. Pulling is
+          # cheap when the layers are already local.
+          for attempt in 1 2 3; do
+            docker pull "$ZEPHYR_CI_IMAGE" && break
+            [ "$attempt" -eq 3 ] && exit 1
+            sleep $((attempt * 5))
+          done
+          # Record what was actually used, so a build stays traceable after the tag
+          # moves. Pin ZEPHYR_CI_IMAGE to an @sha256: digest to make it immutable.
+          docker image inspect --format 'toolchain image: {{index .RepoDigests 0}}' "$ZEPHYR_CI_IMAGE" 2>/dev/null \
+            || docker image inspect --format 'toolchain image id: {{.Id}}' "$ZEPHYR_CI_IMAGE"
+
+          docker run --rm \
+            -u 0:0 \
+            -v "$WORKSPACE_ROOT:$WORKSPACE_ROOT" \
+            -w "$GITHUB_WORKSPACE" \
+            -e GITHUB_WORKSPACE \
+            -e HOME="$CONTAINER_HOME" \
+            -e ZEPHYR_REPO \
+            -e NRF_REPO \
+            "$ZEPHYR_CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+
+              WEST_WORKSPACE="$(dirname "$GITHUB_WORKSPACE")"
+              WEST_CONFIG="$WEST_WORKSPACE/.west/config"
+              MANIFEST_PATH="$(basename "$GITHUB_WORKSPACE")"
+
+              # We run as root in container but the mounted workspace is owned by the runner user.
+              # Tell git to trust the repos we access from the mounted workspace.
+              for safe_dir in "$GITHUB_WORKSPACE" "$ZEPHYR_REPO" "$NRF_REPO" \
+                              "$WEST_WORKSPACE/bootloader/mcuboot"; do
+                git config --global --add safe.directory "$safe_dir"
+              done
+
+              safe_rm() {
+                local p="$1"
+                [ -e "$p" ] || return 0
+                for i in 1 2 3; do
+                  rm -rf "$p" && return 0
+                  echo "rm -rf failed for $p (attempt $i), retrying..."
+                  sync || true
+                  sleep $((i * 2))
+                done
+                if [ -d "$p" ]; then
+                  find "$p" -mindepth 1 -xdev -exec rm -rf {} + 2>/dev/null || true
+                fi
+                rm -rf "$p" || true
+                [ ! -e "$p" ] || { echo "ERROR: could not remove $p"; return 1; }
+              }
+
+              # Wipe west workspace content (sibling dirs)
+              safe_rm "$WEST_WORKSPACE/build"
+              safe_rm "$WEST_WORKSPACE/bootloader"
+              safe_rm "$WEST_WORKSPACE/modules"
+              safe_rm "$WEST_WORKSPACE/tools"
+              safe_rm "$WEST_WORKSPACE/tests"
+              safe_rm "$WEST_WORKSPACE/nrfxlib"
+              safe_rm "$ZEPHYR_REPO"
+              safe_rm "$NRF_REPO"
+
+              if [ -f "$WEST_CONFIG" ] && grep -Eq "^[[:space:]]*path[[:space:]]*=[[:space:]]*$MANIFEST_PATH[[:space:]]*$" "$WEST_CONFIG"; then
+                echo "Reusing existing west workspace at $WEST_WORKSPACE"
+              else
+                safe_rm "$WEST_WORKSPACE/.west"
+                # `west init -l` takes exactly ONE positional (the manifest repo);
+                # the workspace is inferred as its parent. Passing a second arg
+                # makes west exit 2 and (set -e) aborts the Prepare step.
+                west init -l "$GITHUB_WORKSPACE"
+              fi
+
+              # Clean any stale lock files from interrupted runs
+              find "$WEST_WORKSPACE" -name "*.lock" -type f -delete || true
+
+              # Make git more tolerant on slow links
+              git config --global http.lowSpeedLimit 1
+              git config --global http.lowSpeedTime 600
+              git config --global http.postBuffer 524288000
+
+              # No shallow; imports work best with plain west update
+              for attempt in 1 2 3; do
+                if west update --narrow; then
+                  break
+                fi
+                echo "west update failed on attempt $attempt"
+                find "$WEST_WORKSPACE" -name "*.lock" -type f -delete || true
+                [ "$attempt" -eq 3 ] && exit 1
+                sleep $((attempt * 10))
+              done
+
+              python3 -m venv "$HOME/venv"
+              . "$HOME/venv/bin/activate"
+              # Only what a build and an SBOM need, not the SDK's whole development set.
+              # zephyr/scripts/requirements.txt aggregates base + build-test + run-test + extras +
+              # compliance; nothing here runs twister, the docs build or the compliance checks, so
+              # only requirements-base.txt is installed. nrf/scripts/requirements.txt is already
+              # just base + build, so it stays whole.
+              #
+              # jinja2 is listed explicitly because `west ncs-sbom` imports it directly
+              # (nrf/scripts/west_commands/sbom/output_template.py) to render BOTH the HTML and the
+              # SPDX report, and it appears in none of the sets installed here - it used to arrive
+              # transitively through the compliance/docs tools in the aggregate file, so the SBOM
+              # worked by accident. Narrowing without this line would have produced builds with no
+              # SBOM and only a warning to say so.
+              #
+              # scancode-toolkit is deliberately NOT installed: the detector list excludes it
+              # (--optional-license-detectors ''), and requirements-west-ncs-sbom.txt would pull in
+              # scancode-toolkit[full] for a detector nothing asks for.
+              #
+              # Verified in a clean venv with exactly these installs: the sysbuild firmware builds
+              # for ctcc/nrf52840 and both SBOM outputs are produced. Still unpinned and unhashed - a
+              # committed lockfile installed with --require-hashes is the next step if reproducing a
+              # tagged build byte-for-byte ever matters.
+              pip install -U pip setuptools wheel
+              pip install -r "$ZEPHYR_REPO/scripts/requirements-base.txt"
+              pip install -r "$NRF_REPO/scripts/requirements.txt" \
+                || echo "::warning::Some nRF SDK Python requirements failed to install"
+              pip install jinja2
+
+              # Apply downstream patches. The pinned NCS Zephyr fork already
+              # ships the ctcc board (nRF52840/nRF9161); patches/zephyr/0002
+              # adds the nRF9151 target and the board fixes on top (so we no
+              # longer strip the board from the Zephyr tree). The remaining
+              # patches add the custom boot banner, sample/app overlays and the
+              # MCUboot serial-recovery configuration.
+              #
+              # An EMPTY patch set fails the job: a glob over a directory that
+              # does not exist expands to nothing, so a renamed or mistyped
+              # patches/<subdir> would otherwise apply ZERO patches and still
+              # build, and the resulting failure (a pristine SDK has no ctcc
+              # board) surfaces much later and much less clearly.
+              # PATCHES_OPTIONAL lists sets that are allowed to be empty; this
+              # repository builds a single SDK profile and patches both trees, so
+              # it is empty here. The list exists because the same helper is used
+              # where several SDK profiles are built and some sets are legitimately
+              # empty.
+              PATCHES_OPTIONAL=""
+              apply_patches() {
+                local repo="$1" subdir="$2" p count=0
+                for p in "$GITHUB_WORKSPACE/patches/$subdir"/*.patch; do
+                  [ -e "$p" ] || continue
+                  echo "Applying $(basename "$p") to $repo"
+                  git -C "$repo" apply "$p"
+                  count=$((count + 1))
+                done
+                if [ "$count" -gt 0 ]; then
+                  echo "Applied $count patch(es) from patches/$subdir/ to $repo"
+                  return 0
+                fi
+                case " $PATCHES_OPTIONAL " in
+                  *" $subdir "*)
+                    echo "No patches in patches/$subdir/ - expected" ;;
+                  *)
+                    echo "ERROR: no patches found in patches/$subdir/" >&2
+                    exit 1 ;;
+                esac
+              }
+              apply_patches "$ZEPHYR_REPO" zephyr
+              apply_patches "$WEST_WORKSPACE/bootloader/mcuboot" mcuboot
+
+              . "$ZEPHYR_REPO/zephyr-env.sh"
+            '
+
+          # Root container may have created root-owned files; give them back to runner user.
+          sudo chown -R "$(id -u)":"$(id -g)" "$WORKSPACE_ROOT"
+
+      - name: Build firmware in Zephyr container (non-root)
         shell: bash
         run: |
-          west init -l || true
-          west update --narrow -o=--depth=1
+          set -euxo pipefail
 
-          cd $ZEPHYR_REPO
-          git apply $GITHUB_WORKSPACE/patches/zephyr/0001-kernel-banner-add-custom-CTHINGS.CO-banner.patch || true
-          source $ZEPHYR_REPO/zephyr-env.sh
-
-          rm -rf $ZEPHYR_REPO/boards/ct/ctcc || true
-
-      - name: Build firmware
-        shell: bash
-        run: |
           export BRD=${{ matrix.config.BRD }}
           export SOC=${{ matrix.config.SOC }}
           export APP_NAME=${{ matrix.config.APP_NAME }}
           export BUILD_OPTS="${{ matrix.config.BUILD_OPTS }}"
           export NS=${{ matrix.config.NS || 'false' }}
-          export APP_PATH=$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}
+          export APP_PATH="$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}"
           export BUILD_TYPE=${{ matrix.config.BUILD_TYPE }}
-          export IFACE=${{ matrix.config.IFACE }}
 
-          cd $APP_PATH
-          bash $GITHUB_WORKSPACE/.ci_scripts/build_sdk.sh
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          HOST_UID="$(id -u)"
+          HOST_GID="$(id -g)"
+          CONTAINER_HOME="$WORKSPACE_ROOT/.container-home"
+          mkdir -p "$CONTAINER_HOME"
+
+          docker run --rm \
+            -u "$HOST_UID:$HOST_GID" \
+            -v "$WORKSPACE_ROOT:$WORKSPACE_ROOT" \
+            -w "$GITHUB_WORKSPACE" \
+            -e GITHUB_WORKSPACE \
+            -e HOME="$CONTAINER_HOME" \
+            -e ZEPHYR_REPO \
+            -e NRF_REPO \
+            -e ZEPHYR_TOOLCHAIN_VARIANT \
+            -e ZEPHYR_SDK_INSTALL_DIR \
+            -e BRD \
+            -e SOC \
+            -e APP_NAME \
+            -e BUILD_OPTS \
+            -e NS \
+            -e APP_PATH \
+            -e BUILD_TYPE \
+            "$ZEPHYR_CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+              . "$HOME/venv/bin/activate"
+              cd "$APP_PATH"
+              bash "$GITHUB_WORKSPACE/.ci_scripts/build_sdk.sh"
+            '
 
       - name: Collect Artifacts
         shell: bash
         run: |
-          export APP_PATH=$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}
-          mkdir -p $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}
+          set -euxo pipefail
 
-          if [ "${{ matrix.config.BUILD_TYPE }}" = "bootloader" ]; then mv $APP_PATH/build/mcuboot/zephyr/zephyr.elf $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.elf
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.bin
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.hex
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_open_bootloader.lst
-          elif [ "${{ matrix.config.BUILD_TYPE }}" = "firmware" ]; then
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.signed.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.signed.bin || true
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.hex
-            mv $APP_PATH/build/mcuboot/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}_mcuboot.lst
-            mv $APP_PATH/build/merged.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.merged.hex || true
+          APP_PATH="$GITHUB_WORKSPACE/${{ matrix.config.APP_PATH }}"
+          DEST="$ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}"
+          PREFIX="${{ matrix.config.BRD }}_${{ matrix.config.SOC }}"
+          APP="${{ matrix.config.APP_NAME }}"
+          SOC="${{ matrix.config.SOC }}"
+          BUILD_TYPE="${{ matrix.config.BUILD_TYPE }}"
+          mkdir -p "$DEST"
+
+          # Required vs optional, stated per artifact instead of `mv ... || true` on
+          # everything. Every one of these moves used to be either unguarded (so a
+          # missing file failed the job with a raw mv error) or suffixed with
+          # `|| true` - and the `|| true` set included the signed application image
+          # and tfm_merged.hex, the only bootable artifact an nRF91 test build
+          # produces. A job could therefore publish an artifact set with no image in
+          # it and still go green.
+          need() {
+            if [ ! -f "$1" ]; then
+              echo "::error::required artifact missing: $1 (build produced no such file)"
+              exit 1
+            fi
+            mv "$1" "$2"
+          }
+          # Convenience outputs: disassembly listings. Absent on some SDK/board
+          # combinations and never the thing being shipped.
+          want() {
+            if [ -f "$1" ]; then mv "$1" "$2"; fi
+          }
+
+          if [ "$BUILD_TYPE" = "bootloader" ]; then
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.elf" "$DEST/${PREFIX}_open_bootloader.elf"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.bin" "$DEST/${PREFIX}_open_bootloader.bin"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.hex" "$DEST/${PREFIX}_open_bootloader.hex"
+            want "$APP_PATH/build/mcuboot/zephyr/zephyr.lst" "$DEST/${PREFIX}_open_bootloader.lst"
+          elif [ "$BUILD_TYPE" = "firmware" ]; then
+            # The signed image and the SWD-flashable merge are the deliverables.
+            need "$APP_PATH/build/$APP/zephyr/zephyr.signed.bin" "$DEST/${PREFIX}_${APP}.signed.bin"
+            need "$APP_PATH/build/merged.hex"                    "$DEST/${PREFIX}_${APP}.merged.hex"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.hex"      "$DEST/${PREFIX}_${APP}_mcuboot.hex"
+            want "$APP_PATH/build/$APP/zephyr/zephyr.lst"         "$DEST/${PREFIX}_${APP}.lst"
+            want "$APP_PATH/build/mcuboot/zephyr/zephyr.lst"      "$DEST/${PREFIX}_${APP}_mcuboot.lst"
           else
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.elf $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.elf
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.bin $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.bin
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.hex
-            mv $APP_PATH/build/${{ matrix.config.APP_NAME }}/zephyr/zephyr.lst $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.lst
-            mv $APP_PATH/build/merged.hex $ARTIFACT_PATH/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}/${{ matrix.config.BRD }}_${{ matrix.config.SOC }}_${{ matrix.config.APP_NAME }}.merged.hex || true
+            # Standalone image: .ci_scripts/build_sdk.sh builds tests with
+            # --no-sysbuild, so the outputs are directly in build/zephyr/ rather
+            # than one image directory deeper.
+            need "$APP_PATH/build/zephyr/zephyr.elf" "$DEST/${PREFIX}_${APP}.elf"
+            need "$APP_PATH/build/zephyr/zephyr.bin" "$DEST/${PREFIX}_${APP}.bin"
+            need "$APP_PATH/build/zephyr/zephyr.hex" "$DEST/${PREFIX}_${APP}.hex"
+            want "$APP_PATH/build/zephyr/zephyr.lst" "$DEST/${PREFIX}_${APP}.lst"
+            # On the nRF91 *_ns targets zephyr.hex above is the non-secure image
+            # ALONE - it does not boot without TF-M. tfm_merged.hex (TF-M + the NS
+            # image) is what has to be flashed over SWD, so it is the only usable
+            # image in an nRF91 test artifact set and is REQUIRED there. It does not
+            # exist on nRF52840, whose test image is secure and complete on its own.
+            case "$SOC" in
+              nrf91*) need "$APP_PATH/build/zephyr/tfm_merged.hex" "$DEST/${PREFIX}_${APP}_tfm_merged.hex" ;;
+              *)      want "$APP_PATH/build/zephyr/tfm_merged.hex" "$DEST/${PREFIX}_${APP}_tfm_merged.hex" ;;
+            esac
           fi
 
+          # SBOM: west ncs-sbom (HTML + SPDX). Named after what is actually published,
+          # not after APP_NAME. The loader rows build the example application and throw
+          # its image away, keeping only the MCUboot child, so naming the SBOM from
+          # APP_NAME described a binary nobody ships.
+          if [ "$BUILD_TYPE" = "bootloader" ]; then
+            SBOM_NAME="${PREFIX}_open_bootloader_sbom"
+          else
+            SBOM_NAME="${PREFIX}_${APP}_sbom"
+          fi
+          if [ -d "$APP_PATH/build/sbom" ] && [ -n "$(ls -A "$APP_PATH/build/sbom")" ]; then
+            SBOM_DEST="$DEST/$SBOM_NAME"
+            mkdir -p "$SBOM_DEST"
+            cp -r "$APP_PATH/build/sbom/." "$SBOM_DEST/"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            # Best-effort on ordinary runs, mandatory on a release: the SBOM is an
+            # advertised per-firmware deliverable, and every path here used to be
+            # silent, so a release could publish an artifact set without one.
+            echo "::error::no SBOM produced for $SBOM_NAME; a release must ship one"
+            exit 1
+          else
+            echo "::warning::no SBOM produced for $SBOM_NAME"
+          fi
+
+          # SHA-256 of everything collected here (images and SBOM), so a downloaded
+          # artifact set can be checked with `sha256sum -c SHA256SUMS` from inside
+          # its own directory. Paths are relative and sorted, so no runner path
+          # leaks into the published file and the file itself is reproducible.
+          ( cd "$DEST" \
+            && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z \
+               | xargs -0 -r sha256sum > SHA256SUMS )
+          # An empty set must not ship a vacuous checksum file: `xargs -r` writes
+          # nothing when the build produced nothing, and this job would still
+          # pass, publishing a SHA256SUMS that `sha256sum -c` cannot parse for a
+          # directory with no images in it.
+          if [ ! -s "$DEST/SHA256SUMS" ]; then
+            echo "ERROR: no artifacts collected in $DEST - nothing to checksum" >&2
+            exit 1
+          fi
+          # Read it back here too, so a short write fails in the job that built
+          # the images rather than in the packaging job or at the customer.
+          ( cd "$DEST" && sha256sum -c --quiet SHA256SUMS )
+          cat "$DEST/SHA256SUMS"
+
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.config.name }}
           path: ${{ env.ARTIFACT_PATH }}/${{ matrix.config.BRD }}/${{ matrix.config.SOC }}
 
   package:
+    name: Package Firmware Artifacts
     needs: build-matrix
     runs-on: [self-hosted, linux, x64]
-    name: Package Firmware Artifacts
-  
+
     permissions:
       contents: write
-  
+
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      # Checked out only for .ci_scripts/verify_checksums.sh, which the verify
+      # step below runs. Kept shallow: no history is needed here.
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          path: all_artifacts
-  
-      - name: Zip all artifacts
+          clean: true
+          fetch-depth: 1
+
+      # The checkout above already cleans untracked files, but the removal stays
+      # explicit: this runner is self-hosted and reused between runs, and
+      # download-artifact merges into an existing all_artifacts/, so both the zip
+      # and the upload glob could otherwise pick up a previous run's images.
+      - name: Clean the package workspace
         shell: bash
         run: |
-          PKG_NAME="ctcc-firmwares-${{ github.sha }}"
-          if [[ "${{ github.event_name }}" == "release" ]]; then
-            PKG_NAME="ctcc-firmwares-${{ github.ref_name }}"
+          set -euxo pipefail
+          rm -rf all_artifacts
+          rm -f ./*.zip ./*.zip.sha256
+
+      - name: Download artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: all_artifacts
+
+      # Read back every SHA256SUMS the build matrix wrote, BEFORE packaging. The
+      # sets arrive here as artifact downloads; until this step existed the first
+      # `sha256sum -c` anywhere in the chain was the customer's, so the archive
+      # checksum written below would have faithfully certified a corrupt package.
+      - name: Verify artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash .ci_scripts/verify_checksums.sh all_artifacts
+
+      - name: Zip all artifacts
+        shell: bash
+        # REF_NAME and SHA come in as environment variables rather than being
+        # interpolated into the script body. A `${{ github.ref_name }}` expanded
+        # inline is textual substitution into the shell source, so a tag or branch
+        # named with a shell metacharacter would execute as code - on a self-hosted
+        # runner, in a job holding contents: write. Through env: the value is data
+        # the shell never parses.
+        env:
+          REF_NAME: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euxo pipefail
+          PKG_NAME="ctcc-firmwares-$SHA"
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            # A ref name may legally contain '/', which would send zip into a
+            # nonexistent subdirectory; flatten it to a single path component.
+            PKG_NAME="ctcc-firmwares-$(printf '%s' "$REF_NAME" | tr '/' '-')"
           fi
           cd all_artifacts
-          zip -r $PKG_NAME.zip *
-          mv $PKG_NAME.zip ../
-          echo "PKG_NAME=$PKG_NAME" >> $GITHUB_ENV
-  
+          zip -r "$PKG_NAME.zip" .
+          mv "$PKG_NAME.zip" ..
+          cd ..
+          # Checksum of the archive itself, so a download can be verified before it
+          # is unpacked (the per-firmware SHA256SUMS files are inside it).
+          sha256sum "$PKG_NAME.zip" > "$PKG_NAME.zip.sha256"
+          # Read that back too: a short write here would otherwise publish a
+          # checksum that does not match the archive next to it.
+          sha256sum -c "$PKG_NAME.zip.sha256"
+          cat "$PKG_NAME.zip.sha256"
+          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
+
       - name: Upload final package (artifact)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: firmware-package
-          path: ${{ github.workspace }}/*.zip
-  
+          # Named explicitly rather than globbed, so this step can only ever upload
+          # the archive this run produced.
+          path: |
+            ${{ github.workspace }}/${{ env.PKG_NAME }}.zip
+            ${{ github.workspace }}/${{ env.PKG_NAME }}.zip.sha256
+
       - name: Upload to GitHub Release
         if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
+        # Pinned to a full commit SHA (v1) rather than the mutable tag: this
+        # third-party action runs with contents:write + GITHUB_TOKEN, so a moved
+        # or compromised tag must not be able to execute new code here.
+        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
         with:
-          files: ${{ env.PKG_NAME }}.zip
+          files: |
+            ${{ env.PKG_NAME }}.zip
+            ${{ env.PKG_NAME }}.zip.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
