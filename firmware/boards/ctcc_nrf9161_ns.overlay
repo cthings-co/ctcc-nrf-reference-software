@@ -1,0 +1,9 @@
+/*
+ * Copyright (c) 2026 CTHINGS.CO
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/* Shared with the other three nRF91 targets - see the header there for why the
+ * settings partition keeps the size earlier releases gave it. */
+#include "ctcc_nrf91_partitions.dtsi"
