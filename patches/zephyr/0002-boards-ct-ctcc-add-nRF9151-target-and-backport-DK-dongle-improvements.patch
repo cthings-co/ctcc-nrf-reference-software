@@ -1,0 +1,727 @@
+From 6a86df644f9428f1af8e632247c048b0cdfe8d4e Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 3 Jul 2026 13:45:54 +0200
+Subject: [PATCH] boards: ct: ctcc: add nRF9151 target and backport DK/dongle
+ improvements
+
+The ctcc Connectivity Card board only shipped nRF52840 and nRF9161
+targets and had drifted from the upstream nRF52840 Dongle and nRF91 DK
+reference boards. Add the missing nRF9151 target and pull in the
+relevant reference-board improvements.
+
+- Add ctcc/nrf9151 and ctcc/nrf9151/ns targets (dts, common dtsi,
+  pinctrl, defconfigs, yaml), modeled on the nRF9161 target and wired
+  into board.yml, Kconfig.ctcc, Kconfig.defconfig and board.cmake.
+- nrf91: fix the non-secure application SRAM. Point zephyr,sram at
+  sram0_ns_app (128 KB) instead of sram0_ns, whose 168 KB span overlaps
+  the 40 KB modem-library IPC region (sram0_ns_modem) and corrupts the
+  modem shared memory at runtime. Applied to nRF9161 and nRF9151 NS.
+- nrf52840: adopt the zephyr,mapped-partition idiom and enable the second
+  GPIO port (&gpio1), matching the nRF52840 Dongle. Reset-as-GPIO (mPCIe/M.2
+  PERST#) is left to a per-build overlay rather than baked into the board.
+  nfct-pins-as-gpios is deliberately NOT taken from the Dongle: nothing on this
+  card uses P0.09/P0.10, and the property costs a UICR write plus a reset on the
+  first boot of every card (the MDK applies it from SystemInit) and permanently
+  gives up NFC on the part. Add it in an overlay if a firmware ever needs those
+  two pins as GPIOs.
+- Add the J-Link runner to all targets.
+- Size the nRF52840 MCUboot slots for swap-using-move: image-0 and image-1
+  are equal (0x75000 each). boot_slots_compatible() in swap_move.c requires
+  the primary to equal the secondary (or be at most one sector larger) and
+  rejects any other ratio at runtime with "not a compatible amount of
+  sectors"; the previous 0x76000/0x74000 (primary +2 sectors) layout would
+  refuse every DFU swap. The nRF91 targets keep the Nordic equal-slot layout.
+- Fix the external flash JEDEC ID on both nRF91 targets: the MX25R6435FM2IL0
+  fitted on the card answers RDID with c2 28 17 (Macronix, MX25R type 0x28,
+  64 Mbit), not c2 25 38. With the default SPI_NOR_SFDP_MINIMAL the driver
+  compares the read ID against this property and refuses to bind on a mismatch
+  (spi_nor.c, -EINVAL), so the external flash was unusable. Every other Zephyr
+  board carrying this part uses c2 28 17, and the driver's own MX25R type
+  constant is 0x28.
+- Enable the on-board external flash (MX25R6435FM2IL0, 64 Mbit on spi3) on both
+  nRF91 targets. The card is fitted with it, so the board should present it as
+  available; leaving it disabled meant every application had to enable it itself,
+  and the Serial Modem silently lost access to it. Note this is not the nRF9151
+  DK's part (a gd25wb256), and no "nordic,pm-ext-flash" chosen entry is added
+  here: that would hand the flash to Partition Manager for full modem FOTA and
+  move the flash layout.
+- doc: document the nRF9151 target.
+
+Assisted-by: Claude:claude-opus-4-8
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ boards/ct/ctcc/Kconfig.ctcc                   |  1 +
+ boards/ct/ctcc/Kconfig.defconfig              |  2 +-
+ boards/ct/ctcc/board.cmake                    | 13 ++-
+ boards/ct/ctcc/board.yml                      |  3 +
+ boards/ct/ctcc/ctcc_nrf52840.dts              | 37 +++++++-
+ boards/ct/ctcc/ctcc_nrf9151-pinctrl.dtsi      | 46 +++++++++
+ boards/ct/ctcc/ctcc_nrf9151.dts               | 19 ++++
+ boards/ct/ctcc/ctcc_nrf9151.yaml              | 14 +++
+ boards/ct/ctcc/ctcc_nrf9151_common.dtsi       | 95 +++++++++++++++++++
+ boards/ct/ctcc/ctcc_nrf9151_defconfig         | 20 ++++
+ boards/ct/ctcc/ctcc_nrf9151_ns.dts            | 22 +++++
+ boards/ct/ctcc/ctcc_nrf9151_ns.yaml           | 13 +++
+ boards/ct/ctcc/ctcc_nrf9151_ns_defconfig      | 23 +++++
+ boards/ct/ctcc/ctcc_nrf9161_common.dtsi       | 21 +++-
+ boards/ct/ctcc/ctcc_nrf9161_ns.dts            |  2 +-
+ boards/ct/ctcc/doc/index.rst                  | 48 +++++++---
+ .../ctcc/dts/bindings/ct,ctcc-wdisable.yaml   | 18 ++++
+ 17 files changed, 373 insertions(+), 24 deletions(-)
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151-pinctrl.dtsi
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151.dts
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151.yaml
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151_common.dtsi
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151_defconfig
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151_ns.dts
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151_ns.yaml
+ create mode 100644 boards/ct/ctcc/ctcc_nrf9151_ns_defconfig
+ create mode 100644 boards/ct/ctcc/dts/bindings/ct,ctcc-wdisable.yaml
+
+diff --git a/boards/ct/ctcc/Kconfig.ctcc b/boards/ct/ctcc/Kconfig.ctcc
+index 7434347751d..edd918fa6c4 100644
+--- a/boards/ct/ctcc/Kconfig.ctcc
++++ b/boards/ct/ctcc/Kconfig.ctcc
+@@ -6,3 +6,4 @@
+ config BOARD_CTCC
+ 	select SOC_NRF52840_QIAA if BOARD_CTCC_NRF52840
+ 	select SOC_NRF9161_LACA if BOARD_CTCC_NRF9161 || BOARD_CTCC_NRF9161_NS
++	select SOC_NRF9151_LACA if BOARD_CTCC_NRF9151 || BOARD_CTCC_NRF9151_NS
+diff --git a/boards/ct/ctcc/Kconfig.defconfig b/boards/ct/ctcc/Kconfig.defconfig
+index 6087f4fd5db..c8ebd846a1e 100644
+--- a/boards/ct/ctcc/Kconfig.defconfig
++++ b/boards/ct/ctcc/Kconfig.defconfig
+@@ -10,4 +10,4 @@ source "boards/common/usb/Kconfig.cdc_acm_serial.defconfig"
+ endif # BOARD_CTCC_NRF52840
+ 
+ config BOARD_CTCC
+-	select USE_DT_CODE_PARTITION if BOARD_CTCC_NRF9161_NS
++	select USE_DT_CODE_PARTITION if BOARD_CTCC_NRF9161_NS || BOARD_CTCC_NRF9151_NS
+diff --git a/boards/ct/ctcc/board.cmake b/boards/ct/ctcc/board.cmake
+index c4a03b6e905..b173211b664 100644
+--- a/boards/ct/ctcc/board.cmake
++++ b/boards/ct/ctcc/board.cmake
+@@ -1,18 +1,27 @@
+ # SPDX-License-Identifier: Apache-2.0
+ 
+ if(CONFIG_BOARD_CTCC_NRF52840)
++  board_runner_args(jlink "--device=nRF52840_xxAA" "--speed=4000")
+   board_runner_args(nrfjprog "--softreset")
+   board_runner_args(pyocd "--target=nrf52840" "--frequency=4000000")
+   include(${ZEPHYR_BASE}/boards/common/nrfutil.board.cmake)
+   include(${ZEPHYR_BASE}/boards/common/nrfjprog.board.cmake)
++  include(${ZEPHYR_BASE}/boards/common/jlink.board.cmake)
+   include(${ZEPHYR_BASE}/boards/common/pyocd.board.cmake)
+-elseif(CONFIG_BOARD_CTCC_NRF9161 OR CONFIG_BOARD_CTCC_NRF9161_NS)
++elseif(CONFIG_BOARD_CTCC_NRF9161 OR CONFIG_BOARD_CTCC_NRF9161_NS OR CONFIG_BOARD_CTCC_NRF9151 OR CONFIG_BOARD_CTCC_NRF9151_NS)
+   if(CONFIG_TFM_FLASH_MERGED_BINARY)
+     set_property(TARGET runners_yaml_props_target PROPERTY hex_file tfm_merged.hex)
+   endif()
++  if(CONFIG_BOARD_CTCC_NRF9161 OR CONFIG_BOARD_CTCC_NRF9161_NS)
++    board_runner_args(jlink "--device=nRF9161_xxCA" "--speed=4000")
++    board_runner_args(pyocd "--target=nrf9161" "--frequency=4000000")
++  else()
++    board_runner_args(jlink "--device=nRF9151_xxCA" "--speed=4000")
++    board_runner_args(pyocd "--target=nrf9151" "--frequency=4000000")
++  endif()
+   board_runner_args(nrfjprog "--softreset")
+-  board_runner_args(pyocd "--target=nrf9161" "--frequency=4000000")
+   include(${ZEPHYR_BASE}/boards/common/nrfutil.board.cmake)
+   include(${ZEPHYR_BASE}/boards/common/nrfjprog.board.cmake)
++  include(${ZEPHYR_BASE}/boards/common/jlink.board.cmake)
+   include(${ZEPHYR_BASE}/boards/common/pyocd.board.cmake)
+ endif()
+diff --git a/boards/ct/ctcc/board.yml b/boards/ct/ctcc/board.yml
+index e36afe64d4c..dce9125cb6b 100644
+--- a/boards/ct/ctcc/board.yml
++++ b/boards/ct/ctcc/board.yml
+@@ -7,3 +7,6 @@ board:
+     - name: nrf9161
+       variants:
+         - name: 'ns'
++    - name: nrf9151
++      variants:
++        - name: 'ns'
+diff --git a/boards/ct/ctcc/ctcc_nrf52840.dts b/boards/ct/ctcc/ctcc_nrf52840.dts
+index aa408b0b2a3..ea85f4172d9 100644
+--- a/boards/ct/ctcc/ctcc_nrf52840.dts
++++ b/boards/ct/ctcc/ctcc_nrf52840.dts
+@@ -32,6 +32,12 @@
+ 		};
+ 	};
+ 
++	ctcc_wdisable: wdisable {
++		compatible = "ct,ctcc-wdisable";
++		status = "disabled";
++		gpios = <&gpio0 24 GPIO_ACTIVE_LOW>;
++	};
++
+ 	aliases {
+ 		led0 = &led1;
+ 		led1 = &led2;
+@@ -41,27 +47,46 @@
+ };
+ 
+ &flash0 {
++	/*
++	 * Flash layout for MCUboot's swap upgrade algorithms. The primary (image-0)
++	 * and secondary (image-1) slots are EQUAL in size, which is the only ratio
++	 * every algorithm accepts: boot_slots_compatible() in mcuboot swap_move.c
++	 * takes primary == secondary or primary == secondary + 1, swap_offset.c
++	 * takes the mirror of that (secondary == primary + 1), and both refuse
++	 * anything else at runtime with "not a compatible amount of sectors". Both
++	 * slots are therefore 0x75000 (117 x 4 KB pages). Neither algorithm needs a
++	 * scratch partition. The previous layout here was 0x76000 / 0x74000, a
++	 * two-sector gap that both algorithms reject.
++	 *
++	 * The mode itself is not fixed by this file: under sysbuild it comes from
++	 * SB_CONFIG_MCUBOOT_MODE_*, and boot/zephyr/boards/ctcc_nrf52840.conf pins
++	 * CONFIG_BOOT_SWAP_USING_MOVE only for a standalone MCUboot build.
++	 */
+ 	partitions {
+-		compatible = "fixed-partitions";
++		ranges;
+ 		#address-cells = <1>;
+ 		#size-cells = <1>;
+ 
+ 		boot_partition: partition@0 {
++			compatible = "zephyr,mapped-partition";
+ 			label = "mcuboot";
+ 			reg = <0x00000000 0x00012000>;
+ 		};
+ 
+ 		slot0_partition: partition@12000 {
++			compatible = "zephyr,mapped-partition";
+ 			label = "image-0";
+-			reg = <0x00012000 0x00076000>;
++			reg = <0x00012000 0x00075000>;
+ 		};
+ 
+-		slot1_partition: partition@88000 {
++		slot1_partition: partition@87000 {
++			compatible = "zephyr,mapped-partition";
+ 			label = "image-1";
+-			reg = <0x00088000 0x00074000>;
++			reg = <0x00087000 0x00075000>;
+ 		};
+ 
+ 		storage_partition: partition@fc000 {
++			compatible = "zephyr,mapped-partition";
+ 			label = "storage";
+ 			reg = <0x000fc000 0x00004000>;
+ 		};
+@@ -84,6 +109,10 @@
+ 	status = "okay";
+ };
+ 
++&gpio1 {
++	status = "okay";
++};
++
+ &ieee802154 {
+ 	status = "okay";
+ };
+diff --git a/boards/ct/ctcc/ctcc_nrf9151-pinctrl.dtsi b/boards/ct/ctcc/ctcc_nrf9151-pinctrl.dtsi
+new file mode 100644
+index 00000000000..a07800832ba
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151-pinctrl.dtsi
+@@ -0,0 +1,46 @@
++/*
++ * Copyright (c) 2024 CTHINGS.CO
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++&pinctrl {
++	uart0_default: uart0_default {
++		group1 {
++			psels = <NRF_PSEL(UART_TX, 0, 28)>,
++				<NRF_PSEL(UART_RTS, 0, 14)>;
++		};
++
++		group2 {
++			psels = <NRF_PSEL(UART_RX, 0, 29)>,
++				<NRF_PSEL(UART_CTS, 0, 15)>;
++		};
++	};
++
++	uart0_sleep: uart0_sleep {
++		group1 {
++			psels = <NRF_PSEL(UART_TX, 0, 28)>,
++				<NRF_PSEL(UART_RX, 0, 29)>,
++				<NRF_PSEL(UART_RTS, 0, 14)>,
++				<NRF_PSEL(UART_CTS, 0, 15)>;
++			low-power-enable;
++		};
++	};
++
++	spi3_default: spi3_default {
++		group1 {
++			psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
++				<NRF_PSEL(SPIM_MISO, 0, 5)>,
++				<NRF_PSEL(SPIM_MOSI, 0, 4)>;
++			nordic,drive-mode = <NRF_DRIVE_H0H1>;
++		};
++	};
++
++	spi3_sleep: spi3_sleep {
++		group1 {
++			psels = <NRF_PSEL(SPIM_SCK, 0, 3)>,
++				<NRF_PSEL(SPIM_MISO, 0, 5)>,
++				<NRF_PSEL(SPIM_MOSI, 0, 4)>;
++			low-power-enable;
++		};
++	};
++};
+diff --git a/boards/ct/ctcc/ctcc_nrf9151.dts b/boards/ct/ctcc/ctcc_nrf9151.dts
+new file mode 100644
+index 00000000000..22f1cca2e07
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151.dts
+@@ -0,0 +1,19 @@
++/*
++ * Copyright (c) 2024 CTHINGS.CO
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/dts-v1/;
++#include <nordic/nrf9151_laca.dtsi>
++#include "ctcc_nrf9151_common.dtsi"
++
++/ {
++	chosen {
++		zephyr,sram = &sram0_s;
++		zephyr,flash = &flash0;
++		zephyr,code-partition = &slot0_partition;
++		zephyr,sram-secure-partition = &sram0_s;
++		zephyr,sram-non-secure-partition = &sram0_ns;
++	};
++};
+diff --git a/boards/ct/ctcc/ctcc_nrf9151.yaml b/boards/ct/ctcc/ctcc_nrf9151.yaml
+new file mode 100644
+index 00000000000..0d2aa51ad14
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151.yaml
+@@ -0,0 +1,14 @@
++identifier: ctcc/nrf9151
++name: CTHINGS.CO Connectivity Card nRF9151
++type: mcu
++arch: arm
++toolchain:
++  - zephyr
++  - gnuarmemb
++ram: 88
++flash: 1024
++supported:
++  - gpio
++  - watchdog
++  - counter
++vendor: ct
+diff --git a/boards/ct/ctcc/ctcc_nrf9151_common.dtsi b/boards/ct/ctcc/ctcc_nrf9151_common.dtsi
+new file mode 100644
+index 00000000000..a9282e8ec0d
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151_common.dtsi
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (c) 2024 CTHINGS.CO
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++#include "ctcc_nrf9151-pinctrl.dtsi"
++#include <zephyr/dt-bindings/input/input-event-codes.h>
++
++/ {
++	model = "CTHINGS.CO Connectivity Card nRF9151";
++	compatible = "ct,ctcc-nrf9151";
++
++	chosen {
++		zephyr,console = &uart0;
++		zephyr,shell-uart = &uart0;
++		zephyr,uart-mcumgr = &uart0;
++	};
++
++	leds {
++		compatible = "gpio-leds";
++
++		led1: led_1 {
++			gpios = <&gpio0 11 GPIO_ACTIVE_LOW>;
++			label = "LED 1";
++		};
++
++		led2: led_2 {
++			gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
++			label = "LED 2";
++		};
++	};
++
++	ctcc_wdisable: wdisable {
++		compatible = "ct,ctcc-wdisable";
++		status = "disabled";
++		gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
++	};
++
++	aliases {
++		led0 = &led1;
++		led1 = &led2;
++		mcuboot-led0 = &led1;
++		watchdog0 = &wdt0;
++		spi-flash0 = &mx25r6435;
++	};
++};
++
++&gpiote {
++	status = "okay";
++};
++
++&gpio0 {
++	status = "okay";
++};
++
++&uart0 {
++	status = "okay";
++	current-speed = <115200>;
++	pinctrl-0 = <&uart0_default>;
++	pinctrl-1 = <&uart0_sleep>;
++	pinctrl-names = "default", "sleep";
++};
++
++&spi3 {
++	compatible = "nordic,nrf-spim";
++	status = "okay";
++	cs-gpios = <&gpio0 16 GPIO_ACTIVE_LOW>;
++	pinctrl-0 = <&spi3_default>;
++	pinctrl-1 = <&spi3_sleep>;
++	pinctrl-names = "default", "sleep";
++
++	mx25r6435: mx25r6435fm2il0@0 {
++		compatible = "jedec,spi-nor";
++		status = "okay";
++		reg = <0>;
++		spi-max-frequency = <10000000>;
++		size = <DT_SIZE_M(64)>;
++		has-dpd;
++		dpd-wakeup-sequence = <30000>, <20>, <30000>;
++		jedec-id = [c2 28 17];
++	};
++};
++
++/*
++ * Include the standard nRF91 flash layout. It provides equal-sized primary and
++ * secondary MCUboot slots (image-0 / image-1, 0x70000 each). Equal slots are
++ * accepted by every MCUboot swap algorithm - swap_move.c and swap_offset.c each
++ * allow equal and each wants its asymmetry in the opposite direction - so the
++ * memory-optimal "primary larger by one sector + swap-status" asymmetry is
++ * deliberately NOT applied here, and the TF-M secure / non-secure / modem
++ * partitioning stays identical to the Nordic reference. The cost is one sector
++ * (~4 KB) of maximum image size, which is negligible.
++ */
++#include <nordic/nrf91xx_partition.dtsi>
+diff --git a/boards/ct/ctcc/ctcc_nrf9151_defconfig b/boards/ct/ctcc/ctcc_nrf9151_defconfig
+new file mode 100644
+index 00000000000..c486d832382
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151_defconfig
+@@ -0,0 +1,20 @@
++# SPDX-License-Identifier: Apache-2.0
++
++# Enable MPU
++CONFIG_ARM_MPU=y
++
++# Enable hardware stack protection
++CONFIG_HW_STACK_PROTECTION=y
++
++# Enable TrustZone-M
++CONFIG_ARM_TRUSTZONE_M=y
++
++# Enable GPIO
++CONFIG_GPIO=y
++
++# Enable UART driver
++CONFIG_SERIAL=y
++
++# Enable console
++CONFIG_CONSOLE=y
++CONFIG_UART_CONSOLE=y
+diff --git a/boards/ct/ctcc/ctcc_nrf9151_ns.dts b/boards/ct/ctcc/ctcc_nrf9151_ns.dts
+new file mode 100644
+index 00000000000..5c6a8b30b69
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151_ns.dts
+@@ -0,0 +1,22 @@
++/*
++ * Copyright (c) 2024 CTHINGS.CO
++ *
++ * SPDX-License-Identifier: Apache-2.0
++ */
++
++/dts-v1/;
++#include <arm/nordic/nrf9151_ns_laca.dtsi>
++#include "ctcc_nrf9151_common.dtsi"
++
++/ {
++	chosen {
++		zephyr,flash = &flash0;
++		zephyr,sram = &sram0_ns_app;
++		zephyr,code-partition = &slot0_ns_partition;
++	};
++};
++
++/* Disable UART1, because it is used by default in TF-M */
++&uart1 {
++	status = "disabled";
++};
+diff --git a/boards/ct/ctcc/ctcc_nrf9151_ns.yaml b/boards/ct/ctcc/ctcc_nrf9151_ns.yaml
+new file mode 100644
+index 00000000000..1e02fb63d16
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151_ns.yaml
+@@ -0,0 +1,13 @@
++identifier: ctcc/nrf9151/ns
++name: CTHINGS.CO Connectivity Card nRF9151 Non Secure
++type: mcu
++arch: arm
++toolchain:
++  - zephyr
++  - gnuarmemb
++ram: 128
++flash: 192
++supported:
++  - gpio
++  - watchdog
++vendor: ct
+diff --git a/boards/ct/ctcc/ctcc_nrf9151_ns_defconfig b/boards/ct/ctcc/ctcc_nrf9151_ns_defconfig
+new file mode 100644
+index 00000000000..2a74dd56f41
+--- /dev/null
++++ b/boards/ct/ctcc/ctcc_nrf9151_ns_defconfig
+@@ -0,0 +1,23 @@
++# SPDX-License-Identifier: Apache-2.0
++
++# Enable MPU
++CONFIG_ARM_MPU=y
++
++# Enable hardware stack protection
++CONFIG_HW_STACK_PROTECTION=y
++
++# Enable TrustZone-M
++CONFIG_ARM_TRUSTZONE_M=y
++
++# This board implies building Non-Secure firmware
++CONFIG_TRUSTED_EXECUTION_NONSECURE=y
++
++# Enable GPIO
++CONFIG_GPIO=y
++
++# Enable UART driver
++CONFIG_SERIAL=y
++
++# Enable console
++CONFIG_CONSOLE=y
++CONFIG_UART_CONSOLE=y
+diff --git a/boards/ct/ctcc/ctcc_nrf9161_common.dtsi b/boards/ct/ctcc/ctcc_nrf9161_common.dtsi
+index bc13e2d05fb..4a4d6e667e7 100644
+--- a/boards/ct/ctcc/ctcc_nrf9161_common.dtsi
++++ b/boards/ct/ctcc/ctcc_nrf9161_common.dtsi
+@@ -31,6 +31,12 @@
+ 		};
+ 	};
+ 
++	ctcc_wdisable: wdisable {
++		compatible = "ct,ctcc-wdisable";
++		status = "disabled";
++		gpios = <&gpio0 2 GPIO_ACTIVE_LOW>;
++	};
++
+ 	aliases {
+ 		led0 = &led1;
+ 		led1 = &led2;
+@@ -66,15 +72,24 @@
+ 
+ 	mx25r6435: mx25r6435fm2il0@0 {
+ 		compatible = "jedec,spi-nor";
+-		status = "disabled";
++		status = "okay";
+ 		reg = <0>;
+ 		spi-max-frequency = <10000000>;
+ 		size = <DT_SIZE_M(64)>;
+ 		has-dpd;
+ 		dpd-wakeup-sequence = <30000>, <20>, <30000>;
+-		jedec-id = [c2 25 38];
++		jedec-id = [c2 28 17];
+ 	};
+ };
+ 
+-/* Include default memory partition configuration file */
++/*
++ * Include the standard nRF91 flash layout. It provides equal-sized primary and
++ * secondary MCUboot slots (image-0 / image-1, 0x70000 each). Equal slots are
++ * accepted by every MCUboot swap algorithm - swap_move.c and swap_offset.c each
++ * allow equal and each wants its asymmetry in the opposite direction - so the
++ * memory-optimal "primary larger by one sector + swap-status" asymmetry is
++ * deliberately NOT applied here, and the TF-M secure / non-secure / modem
++ * partitioning stays identical to the Nordic reference. The cost is one sector
++ * (~4 KB) of maximum image size, which is negligible.
++ */
+ #include <nordic/nrf91xx_partition.dtsi>
+diff --git a/boards/ct/ctcc/ctcc_nrf9161_ns.dts b/boards/ct/ctcc/ctcc_nrf9161_ns.dts
+index f8a8e588393..1184af4b284 100644
+--- a/boards/ct/ctcc/ctcc_nrf9161_ns.dts
++++ b/boards/ct/ctcc/ctcc_nrf9161_ns.dts
+@@ -11,7 +11,7 @@
+ / {
+ 	chosen {
+ 		zephyr,flash = &flash0;
+-		zephyr,sram = &sram0_ns;
++		zephyr,sram = &sram0_ns_app;
+ 		zephyr,code-partition = &slot0_ns_partition;
+ 	};
+ };
+diff --git a/boards/ct/ctcc/doc/index.rst b/boards/ct/ctcc/doc/index.rst
+index f157c53409d..d19fd27ff05 100644
+--- a/boards/ct/ctcc/doc/index.rst
++++ b/boards/ct/ctcc/doc/index.rst
+@@ -9,7 +9,7 @@ radio interfaces.
+ * The Connectivity Card nRF52840 enables BLE and IEEE 802.15.4 over mPCIe or M.2
+   using USB device with on-board nRF52840 SoC
+ 
+-* The Connectivity Card nRF9161 enables LTE-M/NB-IoT and DECT NR+ over mPCIe or M.2
++* The Connectivity Card nRF9161 and nRF9151 enable LTE-M/NB-IoT and DECT NR+ over mPCIe or M.2
+   using on-board USB-UART converter
+ 
+ Connectivity Card has following features:
+@@ -20,10 +20,10 @@ Connectivity Card has following features:
+ * :abbr:`MPU (Memory Protection Unit)`
+ * :abbr:`NVIC (Nested Vectored Interrupt Controller)`
+ * RADIO (Bluetooth Low Energy and 802.15.4) (only nRF52840)
+-* RADIO (LTE-M/NB-IoT and DECT NR+) (only nRF9161)
++* RADIO (LTE-M/NB-IoT and DECT NR+) (only nRF9161/nRF9151)
+ * :abbr:`RTC (nRF RTC System Clock)`
+ * :abbr:`USB (Universal Serial Bus)` (only nRF52840)
+-* :abbr:`UARTE (Universal asynchronous receiver-transmitter with EasyDMA)` (only nRF9161)
++* :abbr:`UARTE (Universal asynchronous receiver-transmitter with EasyDMA)` (only nRF9161/nRF9151)
+ * :abbr:`WDT (Watchdog Timer)`
+ 
+ .. figure:: img/ctcc_nrf52840_mpcie.webp
+@@ -51,8 +51,8 @@ Hardware
+ ********
+ 
+ * The ``ctcc/nrf52840`` board target has one external oscillator of the 32.768 kHz.
+-* The ``ctcc/nrf9161`` board target has one external SPI NOR 64Mbit memory and one on-board USB-UART
+-  converter (CP210X).
++* The ``ctcc/nrf9161`` and ``ctcc/nrf9151`` board targets have one external SPI NOR 64Mbit memory
++  and one on-board USB-UART converter (CP210X).
+ 
+ Supported Features
+ ==================
+@@ -73,7 +73,7 @@ nRF52840:
+ * LED1 = P0.23
+ * LED2 = P0.22
+ 
+-nRF9161:
++nRF9161 / nRF9151:
+ 
+ * LED1 = P0.11
+ * LED2 = P0.12
+@@ -86,6 +86,25 @@ Programming and Debugging
+ Applications for ``ctcc`` boards can be
+ built in the usual way (see :ref:`build_an_application` for more details).
+ 
++.. note::
++
++   Resetting the card over the mPCIe/M.2 ``PERST#`` line needs ``gpio-as-nreset`` in
++   UICR, and the board devicetree deliberately does not set it: the property is a
++   one-way UICR write plus a reset on the first boot, so it belongs to a deliberate
++   build rather than to every sample someone compiles for this board. A deliberate
++   product build applies an overlay that sets the property for every image it makes,
++   including the bootloader. A sample built straight from this SDK - any of the ones
++   below - therefore has no PERST reset. Add one with an overlay containing::
++
++      &uicr {
++              gpio-as-nreset;
++      };
++
++   passed as ``-DEXTRA_DTC_OVERLAY_FILE=<file>``, plus
++   ``-Dmcuboot_EXTRA_DTC_OVERLAY_FILE=<file>`` when MCUboot is in the build - a card
++   that has only ever run the loader would otherwise have no PERST reset until an
++   application boots once.
++
+ Flashing
+ ========
+ 
+@@ -94,8 +113,10 @@ The board supports the following programming options:
+ 1. Using an external :ref:`debug probe <debug-probes>`
+ 2. Using `MCUboot`_ with MCUmgr support
+ 
+-Below instructions are provided for ``ctcc/nrf52840``, to use ``nrf9161`` target, the USB device configs have
+-to be replaced with UART configurations.
++Below instructions are provided for ``ctcc/nrf52840``; to use the ``nrf9161``
++or ``nrf9151`` target, the USB device configs have to be replaced with UART
++configurations. The ``ctcc/nrf9151`` target is built exactly like
++``ctcc/nrf9161`` - substitute the board target in the commands below.
+ 
+ Option 1: Using an External Debug Probe
+ ---------------------------------------
+@@ -142,9 +163,9 @@ for MCUboot as described on :ref:`west-sign`.
+             :build-dir: mcuboot
+             :goals: build
+ 
+-      .. group-tab:: nRF9161
++      .. group-tab:: nRF9161 / nRF9151
+ 
+-         To build the MCUboot:
++         To build the MCUboot (use ``ctcc/nrf9151`` for the nRF9151 card):
+ 
+          .. zephyr-app-commands::
+             :app: mcuboot/boot/zephyr
+@@ -168,9 +189,10 @@ for MCUboot as described on :ref:`west-sign`.
+             :goals: build
+             :gen-args: -DCONFIG_BOOTLOADER_MCUBOOT=y -DCONFIG_MCUBOOT_SIGNATURE_KEY_FILE=\"path/to/mcuboot/boot/root-rsa-2048.pem\"
+ 
+-      .. group-tab:: nRF9161
++      .. group-tab:: nRF9161 / nRF9151
+ 
+-         Build the blinky example with MCUboot support:
++         Build the blinky example with MCUboot support (use ``ctcc/nrf9151``
++         for the nRF9151 card):
+ 
+          .. zephyr-app-commands::
+             :zephyr-app: samples/basic/blinky
+@@ -194,7 +216,7 @@ with the additional step of connecting an external debugger.
+ To test flashed software, plug in ``ctcc`` card to mPCIe/M.2 slot or use mPCIe/M.2 adapter to USB and plug such adapter to USB port.
+ 
+    * For ``ctcc/nrf52840`` check on Linux system by entering ``lsusb`` command if the following device appears: ``NordicSemiconductor MCUBOOT`` or ``NordicSemiconductor USB-DEV`` (when booted into blinky example).
+-   * For ``ctcc/nrf9161`` it's not possible to see a change in ``lsusb`` due to the on-board USB-UART converter. Instead, connect to the UART console using a terminal emulation program of your choice.
++   * For ``ctcc/nrf9161`` and ``ctcc/nrf9151`` it's not possible to see a change in ``lsusb`` due to the on-board USB-UART converter. Instead, connect to the UART console using a terminal emulation program of your choice.
+ 
+ References
+ **********
+diff --git a/boards/ct/ctcc/dts/bindings/ct,ctcc-wdisable.yaml b/boards/ct/ctcc/dts/bindings/ct,ctcc-wdisable.yaml
+new file mode 100644
+index 00000000000..1ccefee729b
+--- /dev/null
++++ b/boards/ct/ctcc/dts/bindings/ct,ctcc-wdisable.yaml
+@@ -0,0 +1,18 @@
++# Copyright (c) 2024 CTHINGS.CO
++# SPDX-License-Identifier: Apache-2.0
++
++description: GPIO used as input for radio control
++
++compatible: "ct,ctcc-wdisable"
++
++include: base.yaml
++
++properties:
++  status:
++    required: true
++
++  gpios:
++    type: phandle-array
++    required: true
++    description: |
++      GPIO to use as input to control enable/disable radio
+-- 
+2.43.0
+

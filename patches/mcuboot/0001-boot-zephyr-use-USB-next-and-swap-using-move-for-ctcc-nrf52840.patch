@@ -1,0 +1,68 @@
+From 4f1243ac8b01228841489118e945bd3862e89388 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 3 Jul 2026 13:45:54 +0200
+Subject: [PATCH] boot: zephyr: use USB next and swap-using-move for
+ ctcc/nrf52840
+
+Configure the ctcc/nrf52840 bootloader for USB CDC ACM serial recovery
+over the USB device-next stack, and pin the swap algorithm.
+
+- Kconfig.serial_recovery: select USB_DEVICE_STACK_NEXT for BOARD_CTCC_NRF52840.
+- boards/ctcc_nrf52840.conf: enable the device-next CDC ACM class with the
+  CTHINGS USB descriptors, and select CONFIG_BOOT_SWAP_USING_MOVE directly
+  (BOOT_PREFER_SWAP_MOVE is only a preference and is gated out by the default
+  BOOT_PREFER_SWAP_OFFSET). Not silently, though: this file is read only by a
+  standalone MCUboot build, which has no FORCED_CONF_FILE, so kconfig.py runs with
+  error_out=True and the resulting "assigned y but got n" aborts the configure rather
+  than resolving quietly to offset. The fix is the same either way - select the
+  algorithm directly - but the old behaviour was a failed build, not a wrong one.
+
+Assisted-by: Claude:claude-opus-4-8
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ boot/zephyr/Kconfig.serial_recovery   |  4 ++--
+ boot/zephyr/boards/ctcc_nrf52840.conf | 15 +++++++++++----
+ 2 files changed, 13 insertions(+), 6 deletions(-)
+
+diff --git a/boot/zephyr/Kconfig.serial_recovery b/boot/zephyr/Kconfig.serial_recovery
+index 728e844d..6109a6ff 100644
+--- a/boot/zephyr/Kconfig.serial_recovery
++++ b/boot/zephyr/Kconfig.serial_recovery
+@@ -37,8 +37,8 @@ config BOOT_SERIAL_UART
+ 
+ config BOOT_SERIAL_CDC_ACM
+ 	bool "CDC ACM"
+-	select USB_DEVICE_STACK if !(SOC_NRF54LM20A || SOC_NRF54LM20B)
+-	select USB_DEVICE_STACK_NEXT if (SOC_NRF54LM20A || SOC_NRF54LM20B)
++	select USB_DEVICE_STACK if !(SOC_NRF54LM20A || SOC_NRF54LM20B || BOARD_CTCC_NRF52840)
++	select USB_DEVICE_STACK_NEXT if (SOC_NRF54LM20A || SOC_NRF54LM20B || BOARD_CTCC_NRF52840)
+ 	imply DEPRECATION_TEST
+ 	help
+ 	  This setting will choose CDC ACM for serial recovery unless chosen
+diff --git a/boot/zephyr/boards/ctcc_nrf52840.conf b/boot/zephyr/boards/ctcc_nrf52840.conf
+index 5cbe290f..8e1993db 100644
+--- a/boot/zephyr/boards/ctcc_nrf52840.conf
++++ b/boot/zephyr/boards/ctcc_nrf52840.conf
+@@ -16,8 +16,15 @@ CONFIG_BOOT_USB_DFU_WAIT=n
+ CONFIG_MULTITHREADING=y
+ 
+ # USB
+-CONFIG_USB_DEVICE_STACK=y
+-CONFIG_USB_DEVICE_REMOTE_WAKEUP=n
++CONFIG_USB_DEVICE_STACK_NEXT=y
++CONFIG_USBD_CDC_ACM_CLASS=y
++CONFIG_BOOT_SERIAL_CDC_ACM_STRING_MANUFACTURER="CTHINGS.CO"
++CONFIG_BOOT_SERIAL_CDC_ACM_STRING_PRODUCT="CTCC-MCUBOOT"
++CONFIG_BOOT_SERIAL_CDC_ACM_STRING_VID=0x37A1
++CONFIG_BOOT_SERIAL_CDC_ACM_STRING_PID=0x0101
++CONFIG_BOOT_SERIAL_CDC_ACM_MAX_POWER=50
+ 
+-# Partitions set up for swap using move
+-CONFIG_BOOT_PREFER_SWAP_MOVE=y
++# Swap using move. Select the algorithm directly: BOOT_PREFER_SWAP_MOVE is only
++# a preference and is gated out by BOOT_PREFER_SWAP_OFFSET (which defaults y when
++# there is no scratch partition), so it would silently resolve to offset.
++CONFIG_BOOT_SWAP_USING_MOVE=y
+-- 
+2.43.0
+

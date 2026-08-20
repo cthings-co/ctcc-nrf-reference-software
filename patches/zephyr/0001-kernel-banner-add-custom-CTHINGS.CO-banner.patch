@@ -1,29 +1,57 @@
-From b4a8106a3e9c42cc18c6c9d178963cffe2058c3d Mon Sep 17 00:00:00 2001
+From b29b096edf508f42d6e1433601a5877d0b252ab2 Mon Sep 17 00:00:00 2001
 From: Jan Kowalewski <jkowalewski@cthings.co>
-Date: Wed, 4 Dec 2024 16:47:37 +0100
+Date: Fri, 3 Jul 2026 13:45:53 +0200
 Subject: [PATCH] kernel: banner: add custom CTHINGS.CO banner
 
+Print a CTHINGS.CO boot banner and take the firmware revision from the
+application version (APP_VERSION_STRING, from <zephyr/app_version.h>), which
+Zephyr derives from the application's VERSION file - the same version imgtool
+stamps into the MCUboot image header. The include is guarded with __has_include
+so images built without an application VERSION file (e.g. the MCUboot child
+image in a sysbuild) fall back to the standard Zephyr banner line. Note the MCUboot
+child is a poor example of that: bootloader/mcuboot/boot/zephyr ships its own VERSION
+file and zephyr/CMakeLists.txt keys only on EXISTS ${APPLICATION_SOURCE_DIR}/VERSION,
+so app_version.h IS generated for the loader. Its banner is absent for an unrelated
+reason - sdk-nrf configdefaults BOOT_BANNER to n whenever NCS_BOOT_BANNER is y. The
+guard is for an application that genuinely has no VERSION file, such as a stock sample
+or this repository's assembly test.
+
+Assisted-by: Claude:claude-opus-4-8
 Signed-off-by: Jan Kowalewski <jkowalewski@cthings.co>
 ---
- kernel/banner.c | 6 +++++-
- 1 file changed, 5 insertions(+), 1 deletion(-)
+ kernel/banner.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
 
 diff --git a/kernel/banner.c b/kernel/banner.c
-index a16784cb975..a112e3b4384 100644
+index 5cadda0a5e9..29ad48766e1 100644
 --- a/kernel/banner.c
 +++ b/kernel/banner.c
-@@ -43,6 +43,10 @@ __weak void boot_banner(void)
+@@ -8,6 +8,13 @@
+ #include <zephyr/init.h>
+ #include <zephyr/device.h>
+ #include <zephyr/version.h>
++#if defined(__has_include)
++#if __has_include(<zephyr/app_version.h>)
++#include <zephyr/app_version.h>
++#elif __has_include(<app_version.h>)
++#include <app_version.h>
++#endif
++#endif
+ 
+ #if defined(CONFIG_BOOT_DELAY) && (CONFIG_BOOT_DELAY > 0)
+ #define DELAY_STR STRINGIFY(CONFIG_BOOT_DELAY)
+@@ -43,6 +50,10 @@ void boot_banner(void)
  #endif /* CONFIG_BOOT_CLEAR_SCREEN */
  
  #ifdef CONFIG_BOOT_BANNER
 -	printk("*** " CONFIG_BOOT_BANNER_STRING " " BANNER_VERSION BANNER_POSTFIX " ***\n");
-+#ifdef CONFIG_FIRMWARE_REV
-+	printk("*** Firmware revision: " CONFIG_FIRMWARE_REV " ***\n\nCTHINGS.CO®\n\nThe programs included with the Zephyr® RTOS system are free software;\nthe exact distribution terms for each software/library are described in the\nindividual copyrights files according to the Zephyr® west manifest.\n\nZephyr® RTOS comes with ABSOLUTELY NO WARRANTY, to the extent\npermitted by applicable law.\n\n   ____ _____ _   _ ___ _   _  ____ ____   ____ ___\n  / ___|_   _| | | |_ _| \\ | |/ ___/ ___| / ___/ _ \\ \n | |     | | | |_| || ||  \\| | |  _\\___ \\| |  | | | |\n | |___  | | |  _  || || |\\  | |_| |___) | |__| |_| |\n  \\____| |_| |_| |_|___|_| \\_|\\____|____(_)____\\___/\n\n");
++#ifdef APP_VERSION_STRING
++	printk("*** Firmware revision: " APP_VERSION_STRING " ***\n\nCTHINGS.CO®\n\nThe programs included with the Zephyr® RTOS system are free software;\nthe exact distribution terms for each software/library are described in the\nindividual copyrights files according to the Zephyr® west manifest.\n\nZephyr® RTOS comes with ABSOLUTELY NO WARRANTY, to the extent\npermitted by applicable law.\n\n   ____ _____ _   _ ___ _   _  ____ ____   ____ ___\n  / ___|_   _| | | |_ _| \\ | |/ ___/ ___| / ___/ _ \\ \n | |     | | | |_| || ||  \\| | |  _\\___ \\| |  | | | |\n | |___  | | |  _  || || |\\  | |_| |___) | |__| |_| |\n  \\____| |_| |_| |_|___|_| \\_|\\____|____(_)____\\___/\n\n");
 +#else
 +	printk("*** " CONFIG_BOOT_BANNER_STRING " " BANNER_VERSION " " BANNER_POSTFIX " ***\n\nCTHINGS.CO®\n\nThe programs included with the Zephyr® RTOS system are free software;\nthe exact distribution terms for each software/library are described in the\nindividual copyrights files according to the Zephyr® west manifest.\n\nZephyr® RTOS comes with ABSOLUTELY NO WARRANTY, to the extent\npermitted by applicable law.\n\n   ____ _____ _   _ ___ _   _  ____ ____   ____ ___\n  / ___|_   _| | | |_ _| \\ | |/ ___/ ___| / ___/ _ \\ \n | |     | | | |_| || ||  \\| | |  _\\___ \\| |  | | | |\n | |___  | | |  _  || || |\\  | |_| |___) | |__| |_| |\n  \\____| |_| |_| |_|___|_| \\_|\\____|____(_)____\\___/\n\n");
-+#endif /* CONFIG_FIRMWARE_REV */
++#endif /* APP_VERSION_STRING */
  #endif /* CONFIG_BOOT_BANNER */
  }
 -- 
-2.47.0
+2.43.0
 
