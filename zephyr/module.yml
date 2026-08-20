@@ -2,19 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 build:
-  # Path to the Kconfig file that will be sourced into Zephyr Kconfig tree under
-  # Zephyr > Modules > example-application. Path is relative from root of this
+  # Path to the Kconfig file that will be sourced into the Zephyr Kconfig tree
+  # under Zephyr > Modules > ctcc-nrf-reference-software, for every image of every
+  # build this module takes part in. Path is relative to the root of this
   # repository.
   kconfig: Kconfig
   # Path to the folder that contains the CMakeLists.txt file to be included by
   # Zephyr build system. The `.` is the root of this repository.
   cmake: .
-  settings:
-    # Additional roots for boards and DTS files. Zephyr will use the
-    # `<board_root>/boards` for additional boards. The `.` is the root of this
-    # repository.
-    board_root: .
-    # Zephyr will use the `<dts_root>/dts` for additional dts files and
-    # `<dts_root>/dts/bindings` for additional dts binding files. The `.` is
-    # the root of this repository.
-    dts_root: .
+  # No `dts_root` and no `board_root`: the ctcc board lives in the pinned SDK now,
+  # and the board carries its own devicetree AND its own bindings - patches/zephyr/0002
+  # installs boards/ct/ctcc/dts/bindings/ct,ctcc-wdisable.yaml alongside the node, the
+  # way the in-repo board did before the move. Zephyr searches the board directory for
+  # bindings, so there is exactly one owner of that compatible and nothing to keep in
+  # step here.

@@ -3,17 +3,17 @@
 
 manifest:
 
-  defaults:
-    remote: zephyrproject-rtos
-
+  # One remote, one project: everything else comes from sdk-nrf's own manifest via
+  # `import: true`. A `defaults:` block and a second remote were carried over from a
+  # template and pointed at nothing - west never resolved either, since the only
+  # project names its remote explicitly.
   remotes:
-    - name: zephyrproject-rtos
-      url-base: https://github.com/zephyrproject-rtos
     - name: ncs
-      url-base: https://github.com/nrfconnect/
+      url-base: https://github.com/nrfconnect
+
   projects:
     - name: nrf
       repo-path: sdk-nrf
-      revision: v3.1.0
+      revision: v3.4.0
       import: true
       remote: ncs
