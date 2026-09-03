@@ -350,8 +350,12 @@ jobs:
                 sleep $((attempt * 10))
               done
 
-              python3 -m venv "$HOME/venv"
+              # --clear because $HOME is .container-home on the mounted workspace and is NOT
+              # wiped by safe_rm above: a half-built venv from an interrupted run would
+              # survive, and `python3 -m venv` over an existing directory will not repair it.
+              python3 -m venv --clear "$HOME/venv"
               . "$HOME/venv/bin/activate"
+
               # Only what a build and an SBOM need, not the SDK's whole development set.
               # zephyr/scripts/requirements.txt aggregates base + build-test + run-test + extras +
               # compliance; nothing here runs twister, the docs build or the compliance checks, so
@@ -375,8 +379,13 @@ jobs:
               # tagged build byte-for-byte ever matters.
               pip install -U pip setuptools wheel
               pip install -r "$ZEPHYR_REPO/scripts/requirements-base.txt"
-              pip install -r "$NRF_REPO/scripts/requirements.txt" \
-                || echo "::warning::Some nRF SDK Python requirements failed to install"
+              # NOT allowed to fail. This file supplies cryptography, cbor2, click and
+              # zcbor - everything imgtool needs to sign an image, and part of what
+              # `west ncs-sbom` needs. Swallowing a partial install meant either a
+              # ModuleNotFoundError a job phase later with the real cause elsewhere, or
+              # a green artifact set with no SBOM in it. pip is not retried here, unlike
+              # `west update` above, so a transient index failure now fails the job.
+              pip install -r "$NRF_REPO/scripts/requirements.txt"
               pip install jinja2
 
               # Apply downstream patches. The pinned NCS Zephyr fork already
