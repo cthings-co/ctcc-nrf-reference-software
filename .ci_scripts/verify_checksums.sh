@@ -12,9 +12,11 @@
 #   1. every SHA256SUMS verifies (sha256sum -c),
 #   2. at least one set is present, and none is empty - an empty artifact root
 #      means the build stage published nothing, which must not package silently,
-#   3. every file under the root is covered by exactly one SHA256SUMS entry, so
-#      an image copied in after its checksums were generated, or a directory
-#      whose SHA256SUMS never got written, cannot ship unverifiable.
+#   3. every file under the root is covered by a SHA256SUMS entry, so an image
+#      copied in after its checksums were generated, or a directory whose
+#      SHA256SUMS never got written, cannot ship unverifiable. Coverage is
+#      compared as a SET (sort -u both sides), so this proves at-least-one entry
+#      per file, not exactly-one.
 #
 # Usage: verify_checksums.sh <artifact-root> [ignore-glob ...]
 #
@@ -89,20 +91,29 @@ done < "${work}/sets"
 # Everything on disk except the SHA256SUMS files themselves (a checksum file
 # cannot list itself) and whatever the caller asked to ignore.
 find . -type f ! -name SHA256SUMS -printf '%P\n' | LC_ALL=C sort > "${work}/all"
-: > "${work}/actual"
-while IFS= read -r f; do
-  skip=0
-  for g in ${ignores+"${ignores[@]}"}; do
-    # shellcheck disable=SC2254  # $g is a glob on purpose
-    case "${f}" in ${g}) skip=1; break ;; esac
+# Drop the caller's ignore globs from a list of root-relative paths.
+drop_ignored() {
+  local f g skip
+  while IFS= read -r f; do
+    skip=0
+    for g in ${ignores+"${ignores[@]}"}; do
+      # shellcheck disable=SC2254  # $g is a glob on purpose
+      case "${f}" in ${g}) skip=1; break ;; esac
+    done
+    [ "${skip}" -eq 1 ] || printf '%s\n' "${f}"
   done
-  [ "${skip}" -eq 1 ] || printf '%s\n' "${f}" >> "${work}/actual"
-done < "${work}/all"
+}
 
-LC_ALL=C sort -u "${work}/actual"  > "${work}/actual.s"
-LC_ALL=C sort -u "${work}/covered" > "${work}/covered.s"
+# BOTH sides are filtered. An ignored path that a SHA256SUMS happens to name has
+# to drop out of the covered list as well, or it survives there, is missing from
+# the on-disk list, and gets reported as listed-but-absent.
+drop_ignored < "${work}/all"     > "${work}/actual"
+drop_ignored < "${work}/covered" > "${work}/covered.f"
 
-uncovered=$(comm -23 "${work}/actual.s" "${work}/covered.s")
+LC_ALL=C sort -u "${work}/actual"    > "${work}/actual.s"
+LC_ALL=C sort -u "${work}/covered.f" > "${work}/covered.s"
+
+uncovered=$(LC_ALL=C comm -23 "${work}/actual.s" "${work}/covered.s")
 if [ -n "${uncovered}" ]; then
   echo "ERROR: these files are published but listed in no SHA256SUMS:" >&2
   printf '%s\n' "${uncovered}" | sed 's/^/  /' >&2
@@ -111,7 +122,7 @@ fi
 
 # sha256sum -c already reports a listed-but-absent file as FAILED open or read;
 # naming them here says which set is short rather than only that one is.
-absent=$(comm -13 "${work}/actual.s" "${work}/covered.s")
+absent=$(LC_ALL=C comm -13 "${work}/actual.s" "${work}/covered.s")
 if [ -n "${absent}" ]; then
   echo "ERROR: these files are listed in a SHA256SUMS but are not present:" >&2
   printf '%s\n' "${absent}" | sed 's/^/  /' >&2
