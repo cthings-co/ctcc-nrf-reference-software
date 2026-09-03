@@ -145,6 +145,92 @@ scrub_sbom_credentials() {
   fi
 }
 
+# Post-build assertions. Both read an image's GENERATED .config, not its prj.conf, so
+# what they check is what the build actually resolved - including anything a board
+# defconfig, a Kconfig choice default or an SDK patch pulled in behind this repo's back.
+# They run on every image the pipeline publishes.
+
+# patches/zephyr/0003 defaults BOTH APPROTECT choices to LOCK for every ctcc image, so
+# an image that is meant to stay debuggable has to opt out explicitly - and that opt-out
+# is a handful of lines spread over as many files. Dropping one is silent: the image
+# still builds and boots, and then permanently writes UICR.APPROTECT (and on nRF91,
+# UICR.SECUREAPPROTECT via TF-M) on the first card it runs on. There is no way back on
+# that card. So assert the posture rather than trusting the opt-out to still be there.
+#
+# The reference images ship debuggable, which is what a template should do; the board
+# default remains LOCK, so a customer who wants a locked production build gets it by
+# removing their opt-out and setting APPROTECT_EXPECT=lock to have it checked positively.
+assert_approtect() {
+  local cfg="$1" label="$2" expect="${3:-${APPROTECT_EXPECT:-open}}" tz=n ns=n
+  [ -f "${cfg}" ] || { echo "::error::${label}: no .config at ${cfg}"; exit 1; }
+  grep -q '^CONFIG_ARMV8_M_SE=y' "${cfg}" && tz=y
+  grep -q '^CONFIG_ARM_NONSECURE_FIRMWARE=y' "${cfg}" && ns=y
+
+  if [ "${expect}" = "lock" ]; then
+    grep -q '^CONFIG_NRF_APPROTECT_LOCK=y' "${cfg}" || {
+      echo "::error::${label}: NRF_APPROTECT_LOCK is not y - this image would ship with an open debug port"; exit 1; }
+    if [ "${tz}" = y ]; then
+      grep -q '^CONFIG_NRF_SECURE_APPROTECT_LOCK=y' "${cfg}" || {
+        echo "::error::${label}: NRF_SECURE_APPROTECT_LOCK is not y on a TrustZone part - the SECURE access port would stay open"; exit 1; }
+    fi
+    if [ "${ns}" = n ]; then
+      grep -q '^CONFIG_CTCC_APP_PROTECT=y' "${cfg}" || {
+        echo "::error::${label}: CTCC_APP_PROTECT is not y in a secure image - nothing writes UICR, so the lock would last only until the next boot"; exit 1; }
+    fi
+    echo "approtect: ${label}: locked"
+    return 0
+  fi
+
+  # Each of these is a separate way for the board-wide LOCK default to reach a published
+  # image. The SECURE check is deliberately not gated on ${tz}: the choice it comes from
+  # depends on the nRF91 series, so the symbol does not exist on nRF52840 and the grep
+  # cannot false-positive there - and not gating it means a change in how TrustZone is
+  # detected cannot quietly weaken this check.
+  grep -q '^CONFIG_CTCC_APP_PROTECT=y' "${cfg}" && {
+    echo "::error::${label}: CTCC_APP_PROTECT=y in an image that must stay debuggable - it would write UICR.APPROTECT"; exit 1; }
+  grep -q '^CONFIG_NRF_APPROTECT_LOCK=y' "${cfg}" && {
+    echo "::error::${label}: NRF_APPROTECT_LOCK=y in an image that must stay debuggable"; exit 1; }
+  grep -q '^CONFIG_NRF_SECURE_APPROTECT_LOCK=y' "${cfg}" && {
+    echo "::error::${label}: NRF_SECURE_APPROTECT_LOCK=y in an image that must stay debuggable - TF-M would write UICR.SECUREAPPROTECT on its first boot"; exit 1; }
+  echo "approtect: ${label}: open, as a reference image must be"
+}
+
+# The USB identity is what a host matches on, so a wrong or defaulted PID makes an image
+# enumerate as something else - or as Zephyr's sample device. The expected PID is passed
+# in rather than derived, because a firmware build contains two images with two different
+# PIDs. nRF91 has no USB device controller, so there is nothing to check there.
+assert_usb_identity() {
+  local cfg="$1" label="$2" want_pid="$3" sym vid pid mfr
+  case "${SOC}" in nrf52840) ;; *) return 0 ;; esac
+  [ -f "${cfg}" ] || { echo "::error::${label}: no .config at ${cfg}"; exit 1; }
+
+  for sym in CDC_ACM_SERIAL BOOT_SERIAL_CDC_ACM_STRING USB_DEVICE; do
+    vid="$(sed -n "s/^CONFIG_${sym}_VID=//p" "${cfg}" | head -1)"
+    [ -n "${vid}" ] && break
+  done
+  if [ -z "${vid}" ]; then
+    echo "::error::${label}: no USB VID set by any known symbol family (CDC_ACM_SERIAL, BOOT_SERIAL_CDC_ACM_STRING, USB_DEVICE) - the image would take the stack's default identity"
+    exit 1
+  fi
+  case "${vid}" in
+    0x37A1|0x37a1|14241) ;;
+    *) echo "::error::${label}: USB VID is ${vid}, expected 0x37A1 (${sym}_VID)"; exit 1 ;;
+  esac
+
+  pid="$(sed -n "s/^CONFIG_${sym}_PID=//p" "${cfg}" | head -1)"
+  [ -n "${pid}" ] || { echo "::error::${label}: ${sym}_PID is unset - the image would take the stack's default PID"; exit 1; }
+  [ "$((pid))" -eq "$((want_pid))" ] || {
+    echo "::error::${label}: USB PID is ${pid}, expected ${want_pid}"; exit 1; }
+
+  mfr="$(sed -n "s/^CONFIG_${sym}_MANUFACTURER[A-Z_]*=//p" "${cfg}" | head -1)"
+  case "${mfr}" in
+    '"CTHINGS.CO"') ;;
+    '') echo "::error::${label}: ${sym} manufacturer string is unset, expected \"CTHINGS.CO\""; exit 1 ;;
+    *) echo "::error::${label}: USB manufacturer is ${mfr}, expected \"CTHINGS.CO\""; exit 1 ;;
+  esac
+  echo "usb identity: ${label}: ${vid}:${pid} ${mfr} (${sym}_*)"
+}
+
 if [ "${BUILD_TYPE}" = "bootloader" ]; then
   # Open Bootloader (standalone MCUboot). Built as the sysbuild MCUboot CHILD image of
   # the example application, NOT via --no-sysbuild, so it goes through NCS's MCUboot
@@ -177,6 +263,9 @@ if [ "${BUILD_TYPE}" = "bootloader" ]; then
 
   ncs_sbom build/mcuboot mcuboot
 
+  assert_approtect     build/mcuboot/zephyr/.config "open_bootloader"
+  assert_usb_identity  build/mcuboot/zephyr/.config "open_bootloader" 0x0101
+
 elif [ "${BUILD_TYPE}" = "firmware" ]; then
   # Application image built together with MCUboot via sysbuild.
   west build \
@@ -203,6 +292,11 @@ elif [ "${BUILD_TYPE}" = "firmware" ]; then
   # SBOM for the application image and the embedded MCUboot.
   ncs_sbom "build/${APP_NAME}" "${APP_NAME}"
   ncs_sbom build/mcuboot mcuboot
+
+  assert_approtect     "build/${APP_NAME}/zephyr/.config" "${APP_NAME}"
+  assert_usb_identity  "build/${APP_NAME}/zephyr/.config" "${APP_NAME}" 0xF00F
+  assert_approtect     build/mcuboot/zephyr/.config "${APP_NAME}:mcuboot"
+  assert_usb_identity  build/mcuboot/zephyr/.config "${APP_NAME}:mcuboot" 0x0101
 
 else
   # Tests and other standalone applications (built from the current directory).
@@ -238,6 +332,9 @@ else
   west build --no-sysbuild -b "${board}" -p always -- "${cmake_args[@]}"
 
   ncs_sbom build "${APP_NAME}"
+
+  assert_approtect     build/zephyr/.config "${APP_NAME}"
+  assert_usb_identity  build/zephyr/.config "${APP_NAME}" 0xF00F
 fi
 
 # Redact any credential that a tokenized git remote may have leaked into the
