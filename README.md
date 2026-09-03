@@ -170,6 +170,33 @@ tfm_otp   0xf6000..0xf8000
 storage   0xf8000..0x100000
 ```
 
+### Modem firmware (nRF91)
+
+The nRF9151 and nRF9161 run a second firmware that nothing here builds: the modem
+firmware, a signed Nordic binary in its own flash region, never part of an application
+image and never updated by flashing one. A card arrives with a version already on it,
+and an application only asks the modem what that is - `AT+CGMR` through
+`nrf_modem_at_cmd()`, which answers e.g. `mfw_nrf91x1_2.0.4`.
+
+Download it from Nordic (the nRF9151 / nRF9161 product pages, as
+`mfw_nrf91x1_<version>.zip`) and install it over SWD with a debug probe:
+
+```
+nrfutil device program --firmware mfw_nrf91x1_<version>.zip \
+    --serial-number <probe SN> --traits jlink --x-family nrf91
+```
+
+The Programmer app in nRF Connect for Desktop does the same thing. Modem firmware
+cannot be pushed through MCUboot serial recovery or over USB: the only serial route is
+an mcumgr/SMP server in the application that hands the image to the modem bootloader,
+which is what the SDK's `samples/cellular/fmfu_smp_svr` is for. This repository does
+not build that sample - it is the answer for a card already sealed into a host with no
+debug connector.
+
+Check Nordic's modem firmware compatibility matrix before changing version. Each modem
+firmware is tested against particular SDK versions, and that pairing matters more than
+taking the newest of each.
+
 Both maps use equal slots, which is what MCUboot's swap algorithms want:
 ``swap_move.c`` accepts primary == secondary (or primary one sector larger) and
 ``swap_offset.c`` accepts the mirror of that, so equal is the only ratio both take.
