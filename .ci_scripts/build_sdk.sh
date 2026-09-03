@@ -217,6 +217,24 @@ else
   # lands in build/zephyr/ and the flash layout comes from devicetree, which is what
   # this build always wanted. On the nRF91 *_ns targets TF-M is still built as part
   # of it, so build/zephyr/tfm_merged.hex is the image to flash.
+  # firmware/VERSION is the single source of truth for the boot banner
+  # (APP_VERSION_STRING) and the MCUboot image-header version. An application built
+  # from its own directory - the assembly test - carries no VERSION, so without this
+  # Zephyr generates no app_version.h, the banner falls back to its generic form and
+  # the image announces no revision at all. Copied rather than duplicated as a second
+  # tracked file, so there is exactly one version to bump.
+  # Copied on every build, not only when absent: the installed file is a generated
+  # artefact (gitignored), so a copy left by an earlier build must not survive a
+  # version bump. Skipping the copy made the image keep reporting the old version -
+  # measured, an assembly image announcing 1.2.0 after firmware/VERSION went to 1.3.0 -
+  # which is the exact traceability failure this file exists to prevent. Invisible in
+  # CI, where every checkout is fresh, and silent for anyone building locally.
+  if [ ! -f "${FW_DIR}/VERSION" ]; then
+    echo "WARNING: ${FW_DIR}/VERSION not found; '${APP_NAME}' built without an app version" >&2
+  elif [ "$(pwd)" != "$(cd "${FW_DIR}" && pwd)" ]; then
+    cp -a "${FW_DIR}/VERSION" VERSION
+  fi
+
   west build --no-sysbuild -b "${board}" -p always -- "${cmake_args[@]}"
 
   ncs_sbom build "${APP_NAME}"
