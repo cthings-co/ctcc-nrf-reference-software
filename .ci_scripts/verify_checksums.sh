@@ -11,7 +11,9 @@
 # Three things are checked; any of them failing fails the job:
 #   1. every SHA256SUMS verifies (sha256sum -c),
 #   2. at least one set is present, and none is empty - an empty artifact root
-#      means the build stage published nothing, which must not package silently,
+#      means the build stage published nothing, which must not package silently;
+#      with EXPECTED_SETS in the environment this is tightened from "at least
+#      one" to "exactly that many" (see below),
 #   3. every file under the root is covered by a SHA256SUMS entry, so an image
 #      copied in after its checksums were generated, or a directory whose
 #      SHA256SUMS never got written, cannot ship unverifiable. Coverage is
@@ -20,9 +22,24 @@
 #
 # Usage: verify_checksums.sh <artifact-root> [ignore-glob ...]
 #
-# Ignore globs are matched against the path relative to <artifact-root>, and are
-# meant for files the packaging job itself writes there (its own *.zip and
+# EXPECTED_SETS (optional, from the environment): how many SHA256SUMS files the
+# caller knows must be there. Without it the strongest statement this script can
+# make is "the tree is not empty", so a tree that arrives with eight of the nine
+# sets the build matrix produces verifies perfectly clean, and the release archive
+# is packaged one firmware short with a valid .zip.sha256 over it. Every checksum
+# in the chain certifies what arrived; only this certifies that all of it did.
+#
+# Ignore globs are matched against the whole path relative to <artifact-root>, and
+# are meant for files the packaging job itself writes there (its own *.zip and
 # *.zip.sha256), which are covered by the archive checksum instead.
+#
+# A glob matches at ANY DEPTH: `case` patterns are not path-aware, so a `*.zip`
+# meant for the packaging job's archive at the root would also match a zip
+# published INSIDE an artifact set (an mcumgr/DFU update package, say) and quietly
+# excuse it from the coverage check. Name a root file precisely if that is what
+# you mean. CI passes no globs at all - the packaging job deletes its own archive
+# before calling this and writes it afterwards - so that path is defensive rather
+# than exercised.
 
 set -euo pipefail
 
@@ -44,9 +61,12 @@ root_abs=$(pwd)
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
 
-# NUL-delimited throughout: artifact names come from board/SoC/app variables and
-# should never contain spaces, but a checksum tool that mangles an unexpected
-# name is worse than one that refuses it.
+# NUL-delimited here: artifact names come from board/SoC/app variables and should
+# never contain spaces, but a checksum tool that mangles an unexpected name is
+# worse than one that refuses it. The coverage listing further down is
+# newline-delimited instead, which is safe in the other direction: a name
+# containing a newline splits into two lines that match nothing, so it is
+# REPORTED as uncovered rather than passing silently.
 find . -type f -name SHA256SUMS -print0 | LC_ALL=C sort -z > "${work}/sets"
 sets=$(tr -cd '\0' < "${work}/sets" | wc -c)
 
@@ -54,6 +74,28 @@ if [ "${sets}" -eq 0 ]; then
   echo "ERROR: no SHA256SUMS anywhere under ${root_abs}" >&2
   echo "       the build stage published nothing, or published it somewhere else" >&2
   exit 1
+fi
+
+# "At least one set" is the weakest possible form of the rule that an empty set
+# must not ship a vacuous checksum file. A caller that knows how many sets it is
+# expecting gets the strong form, because the interesting failure is not an empty
+# tree - a tree one set SHORT is verified, packaged, checksummed and released as
+# though it were complete: a matrix row that succeeded while uploading nothing, an
+# upload that expired before the packaging job ran, an artifact that did not come
+# back down. Nothing else in the chain looks at how many sets there are.
+if [ -n "${EXPECTED_SETS:-}" ]; then
+  case "${EXPECTED_SETS}" in
+    ''|*[!0-9]*)
+      echo "ERROR: EXPECTED_SETS must be a whole number, got '${EXPECTED_SETS}'" >&2
+      exit 2
+      ;;
+  esac
+  if [ "${sets}" -ne "${EXPECTED_SETS}" ]; then
+    echo "ERROR: expected ${EXPECTED_SETS} artifact set(s) under ${root_abs}, found ${sets}" >&2
+    echo "       the sets that did arrive:" >&2
+    tr '\0' '\n' < "${work}/sets" | sed -e 's|^\./||' -e 's|^|         |' >&2
+    exit 1
+  fi
 fi
 
 rc=0

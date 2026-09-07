@@ -150,4 +150,11 @@ merge, and read the diff for what the gates cannot see.
   requests from forks; a maintainer builds those. Expect to be asked for build
   output if you cannot run it yourself.
 
+  The matrix waits on both gates above and does not start until they pass. There
+  is one self-hosted runner and the matrix rows run on it one at a time, so before
+  this ordering existed a missing sign-off cost every other pull request a full
+  matrix of build time and told its author nothing until the end. What that means
+  for you: if a gate is red you get **no build output at all**. Fix the gate, push
+  again, and the build starts on the new head commit.
+
 Questions about production firmware, signing keys or hardware: support@cthings.co

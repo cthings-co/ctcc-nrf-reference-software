@@ -109,7 +109,9 @@ The published loader carries **no in-band version**: `firmware/VERSION` reaches 
 application's image header and boot banner, not MCUboot, and the `VERSION bump` gate
 does not give the loader one either. On nRF52840 the only thing a host can read back is
 the CDC ACM product string and `37a1:0101`, which are the same in every release. So
-identify a loader by the release archive it came from, not by asking the card - or bump
+identify a loader by its filename - CI stamps every published image with a build date
+and, on anything that is not a release, the short commit, see
+[Published artifact names](#published-artifact-names) - not by asking the card, or bump
 its product string per release if that matters to you.
 
 The loader is `build/mcuboot/zephyr/zephyr.hex`; the application image is built and
@@ -292,6 +294,14 @@ card's port from the list above):
 * To load produced firmware: `smpmgr --mtu 132 --port /dev/ttyACM0 image upload build/firmware/zephyr/zephyr.signed.bin`
 * See if the image has been loaded (there should be one image on the list): `smpmgr --mtu 132 --port /dev/ttyACM0 image state-read`
 * Reboot the device to boot into image: `smpmgr --mtu 132 --port /dev/ttyACM0 os reset`
+
+The CI artifact set also carries the same signed image as an nRF Connect SDK DFU package,
+`ctcc_<soc>_firmware.dfu_application.zip`, alongside a
+`ctcc_<soc>_firmware.dfu_application.manifest.json` naming the board, the load address and
+the image version taken from `firmware/VERSION`. The `smpmgr image upload` step above wants
+the raw `.signed.bin` (which is what the zip contains); the package is for tools that consume
+that format, and its manifest is the only machine-readable place in a release where the
+image version appears.
  
 After rebooting, the device will enter Bootloader again, wait 5 seconds and then it should boot the loaded firmware. To check the result, try to connect to the console e.g. using `picocom`: `sudo picocom -b 115200 /dev/ttyACM0` (or the `/dev/ttyUSB*` port on an nRF91 card).
 
@@ -300,6 +310,34 @@ If you want to flash whole bootloader + image through e.g. external debugger, pl
 * `nrfjprog --recover -f nrf52` (or nrf91)
 * `nrfjprog --program firmware/build/merged.hex --sectorerase --verify -f nrf52` (or nrf91)
 
+### Published artifact names
+
+Every published file is stamped, so an image stays identifiable after it is copied out
+of the archive - which is what actually happens, since the flashing instructions above
+hand you a single `.hex`. The shape is:
+
+```
+<board>_<soc>_<what it is>[_<role>]_<stamp>.<ext>
+```
+
+The stamp is `YYYYMMDD` (UTC) on a release and `YYYYMMDD-<8-char commit>` on anything
+else. A release needs no commit in the name - its tag names the archive and
+`firmware/VERSION` is in the application's image header - while a branch build is a
+moving target and two builds of the same branch on the same day are the normal case.
+
+```
+ctcc_nrf52840_open_bootloader_20260907-1a2b3c4d.hex     loader, SWD only
+ctcc_nrf52840_firmware_20260907-1a2b3c4d.signed.bin     application, serial recovery
+ctcc_nrf52840_firmware_20260907-1a2b3c4d.merged.hex     loader + application, SWD
+ctcc_nrf52840_firmware_mcuboot_20260907-1a2b3c4d.hex    the loader inside that merge
+ctcc_nrf9161_assembly_tfm_merged_20260907-1a2b3c4d.hex  TF-M + the NS test image
+```
+
+The archive is `ctcc-firmwares-<tag>.zip` for a release and
+`ctcc-firmwares-<branch>-<8-char commit>-<YYYYMMDD>.zip` otherwise. `SHA256SUMS` is
+generated from whatever the build actually collected, so it lists the stamped names and
+the verification recipe below is unaffected.
+
 ### Verifying a download
 
 CI publishes checksums alongside the images, so a download can be checked before
@@ -307,16 +345,57 @@ anything is flashed. Every firmware's artifact directory carries a `SHA256SUMS`
 covering all of its files (images and SBOM), and the packaged archive is published
 with a `.zip.sha256` beside it.
 
+The SBOM (`west ncs-sbom`, an HTML license report plus an SPDX document) is a
+per-image deliverable rather than a per-directory one: a firmware set carries one for
+the application image and one for the embedded MCUboot, a bootloader set carries the
+loader's. On an ordinary run a build that cannot produce one warns and carries on; on
+a **release** a missing or empty SBOM fails the build - once in
+`.ci_scripts/build_sdk.sh` where it is generated, and again in the workflow at the
+point the files become published artifacts. A released artifact set is therefore
+either complete or absent, never quietly short the SBOM for the binary you are about
+to flash.
+
 The workflow also reads them back before packaging - `.ci_scripts/verify_checksums.sh`
 re-checks every `SHA256SUMS` in the downloaded artifact tree and fails the release
 rather than publish a set that does not match, or a directory whose files are not
-all covered - so a mismatch on your download points at the download, not the build:
+all covered - so a mismatch on your download points at the download, not the build.
+It also counts them: the archive is built only when every artifact set the build
+matrix produces has arrived, so a release cannot be one firmware short and still
+carry a `.zip.sha256` that checks out:
 
 ```
 sha256sum -c ctcc-firmwares-<tag>.zip.sha256
 unzip ctcc-firmwares-<tag>.zip
 cd nrf9151-firmware && sha256sum -c SHA256SUMS
 ```
+
+How long each copy is kept, because the two are not kept for the same time:
+
+* The **GitHub Release assets** - `ctcc-firmwares-<tag>.zip` and its `.zip.sha256` -
+  are the permanent copy of a release. They are not workflow artifacts and do not
+  expire.
+* The **workflow run artifacts** do expire. The packaged archive is kept for 90
+  days, and the nine per-firmware artifact sets - the directories carrying the
+  SBOMs and the per-set `SHA256SUMS` - for 7 days, since their only consumer is
+  the packaging job minutes later.
+
+So a week after a run, the SBOM of a released build is still available, but from
+inside the release archive, which contains the same per-firmware directories.
+
+### Build environment
+
+Every artifact directory also carries `<board>_<soc>_python-requirements.lock`, the
+`pip freeze` of the virtualenv that built and signed those images. The per-firmware
+SBOM covers *sources* - it records which sdk-nrf revision an image came from, but
+nothing about the `cryptography`, `imgtool`, `zcbor` or `nrf-regtool` that produced
+the signature. The lockfile is that missing half, and it sits inside the same
+`SHA256SUMS` as the images.
+
+`west` itself is pinned separately, as `WEST_VERSION` in
+`.ci_scripts/prepare_workspace.sh`. The virtualenv is created *before* `west init`,
+so one pinned west both resolves the manifest and builds the images; bumping it is a
+deliberate commit, the same as bumping the SDK revision in `west.yml` or the
+container image in the workflow.
 
 ## Assembly test
 

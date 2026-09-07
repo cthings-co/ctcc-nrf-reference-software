@@ -74,6 +74,10 @@ target/
 compliance.xml
 _error.types
 
+# Written by .ci_scripts/prepare_workspace.sh (pip freeze of the build venv) and
+# published as an artifact by the workflow; never committed from a local run.
+/python-requirements.lock
+
 # Tag files
 GPATH
 GRTAGS
