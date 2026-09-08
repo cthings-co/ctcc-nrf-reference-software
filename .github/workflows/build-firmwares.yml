@@ -512,10 +512,29 @@ jobs:
             printf '%s' "$gb"
           }
 
+          # The thresholds here and below are measured rather than guessed. A narrow
+          # depth-1 NCS v3.4 workspace is 5.6G, one sysbuild tree is another 2-3G, and
+          # the pinned toolchain image already occupies 15-20G before this job starts.
+          # So a row needs about 9G, which is what the 10G floor below encodes - but
+          # warning at 30G is three times that, and on a 61G runner it fired on every
+          # run while reclaiming 0B. A warning that is always on teaches a reader to
+          # skip it. 18G is twice what a row needs: still early enough to catch a real
+          # leak, quiet when the disk is merely well used.
           docker_gb="$(avail_gb /var/lib/docker)"
-          if [ -n "$docker_gb" ] && [ "$docker_gb" -lt 30 ]; then
+          if [ -n "$docker_gb" ] && [ "$docker_gb" -lt 18 ]; then
             echo "::notice::${docker_gb}G free under /var/lib/docker; reclaiming space"
+            # Say what holds the space before reclaiming any of it. On this runner the
+            # honest answer is "the pinned image, legitimately", and a prune reporting
+            # 0B without that context reads as a broken cleanup rather than a clean
+            # docker.
+            docker system df || true
             docker image prune -f || true
+            # Stopped containers and build cache too. Both are normally empty here -
+            # every docker run in this workflow passes --rm and nothing builds an image
+            # - so this is insurance against a cancelled run leaving a container
+            # behind, not a routine reclaim.
+            docker container prune -f || true
+            docker builder prune -f || true
             # Matched against ZEPHYR_CI_IMAGE_TAG, not ZEPHYR_CI_IMAGE: the pin is a
             # digest reference now, and a digest reference never equals a
             # Repository:Tag line, so this sweep would have untagged the very image the
@@ -528,19 +547,25 @@ jobs:
             echo "${docker_gb:-unknown}G free under /var/lib/docker; skipping image cleanup"
           fi
 
-          # Nothing this job can do frees space under $WORKSPACE_ROOT - the west trees
-          # and the build outputs there are its own inputs - so this half only reports,
-          # and refuses to start below a hard floor. Failing in the first minute with
-          # "4G free under <workspace>" is worth far more than the same run dying
-          # forty minutes later inside a compile with a linker error.
+          # Nothing this job can do frees space under $WORKSPACE_ROOT while it runs -
+          # the west trees and the build outputs there are its own inputs - so this half
+          # reports, refuses to start below a hard floor, and leaves the reclaiming to
+          # the step at the end of this job, which drops the workspace once the
+          # artifacts are safely uploaded. Failing in the first minute with "4G free
+          # under <workspace>" is worth far more than the same run dying forty minutes
+          # later inside a compile with a linker error.
           ws_gb="$(avail_gb "$WORKSPACE_ROOT")"
           if [ -z "$ws_gb" ]; then
             echo "::warning::could not measure free space under $WORKSPACE_ROOT"
           elif [ "$ws_gb" -lt 10 ]; then
-            echo "::error::only ${ws_gb}G free under $WORKSPACE_ROOT; a freshly cloned west workspace plus one build tree needs more than that. Reclaim space on the runner before retrying."
+            echo "::error::only ${ws_gb}G free under $WORKSPACE_ROOT; a freshly cloned west workspace (5.6G measured) plus one build tree needs more than that. Reclaim space on the runner before retrying."
             exit 1
-          elif [ "$ws_gb" -lt 30 ]; then
-            echo "::warning::only ${ws_gb}G free under $WORKSPACE_ROOT; the west workspace is re-cloned on every matrix row, so this run may still hit ENOSPC"
+          elif [ "$ws_gb" -lt 18 ]; then
+            echo "::warning::only ${ws_gb}G free under $WORKSPACE_ROOT; a row needs about 9G, so this is thin enough to be worth looking at"
+            # Name the biggest consumers rather than only the shortfall: without this
+            # the warning says a run may fail and gives a reader nowhere to start.
+            # maxdepth 1 keeps it to one level and a second or two.
+            du -h --max-depth=1 "$WORKSPACE_ROOT" 2>/dev/null | sort -h | tail -8 || true
           else
             echo "${ws_gb}G free under $WORKSPACE_ROOT"
           fi
@@ -989,6 +1014,41 @@ jobs:
         run: |
           set -euo pipefail
           echo "count=$JOB_TOTAL" >> "$GITHUB_OUTPUT"
+
+      # The west workspace is disposable by construction: prepare_workspace.sh wipes
+      # and re-clones every one of these paths at the start of every row, so nothing
+      # downstream ever reads what a previous row left. Holding 5.6G of it between runs
+      # therefore buys nothing, and it is the single largest thing on this runner that
+      # CI is allowed to delete - the toolchain image is 15-20G and is wanted, the
+      # runner's own tooling is not ours to touch.
+      #
+      # if: always() so a failed row reclaims too. That is the case that matters: a row
+      # that dies mid-compile is exactly when the disk is tightest, and this runs after
+      # the artifact upload, so nothing a later job needs is removed. Build logs live in
+      # the run, not on the runner, and the artifacts are already uploaded - and since
+      # nobody has a shell on this runner, keeping the tree for post-mortem inspection
+      # is not an option anyone can use anyway.
+      - name: Release the west workspace back to the runner
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          before="$(df -BG --output=avail "$WORKSPACE_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true)"
+
+          # Only the manifest-managed trees, named explicitly. No wildcard: this deletes
+          # from the parent of the checkout, and a glob there is one typo away from
+          # removing the checkout itself or another repository's workspace.
+          for p in bootloader modules tools test nrfxlib zephyr nrf .west; do
+            rm -rf "$WORKSPACE_ROOT/$p"
+          done
+
+          after="$(df -BG --output=avail "$WORKSPACE_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true)"
+          if [ -n "$before" ] && [ -n "$after" ]; then
+            echo "::notice::released the west workspace: ${before}G -> ${after}G free under $WORKSPACE_ROOT"
+          else
+            echo "released the west workspace under $WORKSPACE_ROOT"
+          fi
 
   package:
     name: Package Firmware Artifacts
