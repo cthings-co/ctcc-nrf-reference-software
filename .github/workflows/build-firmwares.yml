@@ -82,7 +82,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so the pull request's base revision is reachable.
           fetch-depth: 0
@@ -164,7 +164,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history so both ends of the pull request range are reachable.
           fetch-depth: 0
@@ -429,7 +429,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           clean: true
           fetch-depth: 1
@@ -952,7 +952,7 @@ jobs:
           cat "$DEST/SHA256SUMS"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ${{ matrix.config.name }}
           # env.SOC_SAFE, not matrix.config.SOC: the Collect step writes its artifacts
@@ -1008,7 +1008,7 @@ jobs:
       # Checked out only for .ci_scripts/verify_checksums.sh, which the verify
       # step below runs. Kept shallow: no history is needed here.
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           clean: true
           fetch-depth: 1
@@ -1057,7 +1057,7 @@ jobs:
           rm -f ./*.zip ./*.zip.sha256
 
       - name: Download artifacts
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: all_artifacts
 
@@ -1128,7 +1128,7 @@ jobs:
           echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
 
       - name: Upload final package (artifact)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: firmware-package
           # Named explicitly rather than globbed, so this step can only ever upload
@@ -1155,7 +1155,7 @@ jobs:
         # Pinned to a full commit SHA (v1) rather than the mutable tag: this
         # third-party action runs with contents:write + GITHUB_TOKEN, so a moved
         # or compromised tag must not be able to execute new code here.
-        uses: softprops/action-gh-release@de2c0eb89ae2a093876385947365aca7b0e5f844 # v1
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           # The last boundary in the chain, and the only one whose result the
           # customer sees. Unmatched files are skipped silently by default, so a
