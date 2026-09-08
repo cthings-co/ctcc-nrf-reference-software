@@ -570,7 +570,32 @@ jobs:
             echo "${ws_gb}G free under $WORKSPACE_ROOT"
           fi
 
+          # Inodes as well as bytes. A git checkout that dies with "unable to write new
+          # index file" is out of one or the other, and this pair is what separates the
+          # two in a log after the fact.
           df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          df -i "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+
+          # A cancelled run can leave its container alive, and that container still has
+          # this workspace bind-mounted. `--rm` deletes a container that EXITS; it does
+          # nothing for one whose job was cancelled out from under it, which is exactly
+          # what `cancel-in-progress: true` above does on every push to an open pull
+          # request. Two `west update`s then write the same trees at once, and the loser
+          # reports "fatal: unable to write new index file" - not a disk problem at all,
+          # despite reading exactly like one.
+          #
+          # So take the mount back before touching it. Filtering on the mount source is
+          # what makes this precise: it stops containers holding THIS workspace and
+          # leaves anything else on the runner alone. `|| true` throughout because a
+          # daemon that does not support the filter must not fail the build - it just
+          # means this net catches nothing, which is where we already were.
+          stale_ctrs="$(docker ps -q --filter "volume=$WORKSPACE_ROOT" 2>/dev/null || true)"
+          if [ -n "$stale_ctrs" ]; then
+            echo "::warning::container(s) from an earlier run still hold $WORKSPACE_ROOT; stopping them before preparing the workspace: $(echo $stale_ctrs | tr '\n' ' ')"
+            # SIGTERM first so a mid-write git gets to finish its syscall, then force.
+            docker stop -t 15 $stale_ctrs || true
+            docker rm -f $stale_ctrs || true
+          fi
 
           # Refuse a tag. ZEPHYR_CI_IMAGE must be a digest reference, because that is
           # what makes the pull verifiable: docker checks the content it fetches

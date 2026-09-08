@@ -66,15 +66,23 @@ safe_rm() {
   [ ! -e "$p" ] || { echo "ERROR: could not remove $p"; return 1; }
 }
 
-# Wipe west workspace content (sibling dirs)
-safe_rm "$WEST_WORKSPACE/build"
-safe_rm "$WEST_WORKSPACE/bootloader"
-safe_rm "$WEST_WORKSPACE/modules"
-safe_rm "$WEST_WORKSPACE/tools"
-safe_rm "$WEST_WORKSPACE/test"
-safe_rm "$WEST_WORKSPACE/nrfxlib"
-safe_rm "$ZEPHYR_REPO"
-safe_rm "$NRF_REPO"
+# Wipe west workspace content (sibling dirs). A function rather than a straight run
+# of safe_rm calls because the `west update` retry loop below needs exactly the same
+# set: a failed update leaves a project half checked out, and git then refuses every
+# retry with "untracked working tree files would be overwritten by checkout" - so the
+# retries can only help if the tree they retry into is empty again.
+wipe_west_trees() {
+  safe_rm "$WEST_WORKSPACE/build"
+  safe_rm "$WEST_WORKSPACE/bootloader"
+  safe_rm "$WEST_WORKSPACE/modules"
+  safe_rm "$WEST_WORKSPACE/tools"
+  safe_rm "$WEST_WORKSPACE/test"
+  safe_rm "$WEST_WORKSPACE/nrfxlib"
+  safe_rm "$ZEPHYR_REPO"
+  safe_rm "$NRF_REPO"
+}
+
+wipe_west_trees
 
 # The Python environment is built HERE, before `west init` and `west update`,
 # and that order is the whole point of this block. Until it moved up, two
@@ -298,7 +306,23 @@ for attempt in 1 2 3; do
   fi
   echo "west update failed on attempt $attempt"
   find "$WEST_WORKSPACE" -name "*.lock" -type f -delete || true
-  [ "$attempt" -eq 3 ] && exit 1
+  if [ "$attempt" -eq 3 ]; then
+    # State before giving up, because the interesting failures here are not network
+    # errors. A checkout that dies with "unable to write new index file" is out of
+    # space OR out of inodes, and `df -h` alone cannot tell those apart - measured on
+    # a runner reporting 29G free while one row failed and the other eight passed.
+    echo "state of the workspace filesystem after three failed attempts:"
+    df -h "$WEST_WORKSPACE" || true
+    df -i "$WEST_WORKSPACE" || true
+    exit 1
+  fi
+  # Deleting the trees before retrying, not just the lock files. Removing locks
+  # recovers an interrupted git; it does nothing for a project whose working tree was
+  # half written, and git refuses to check out over those files, so attempts 2 and 3
+  # failed identically to attempt 1 for a reason that had nothing to do with attempt
+  # 1's cause. The re-fetch this costs is the price of a retry that can actually pass.
+  echo "wiping the west trees so the retry starts from an empty working tree"
+  wipe_west_trees
   sleep $((attempt * 10))
 done
 
