@@ -1,0 +1,44 @@
+From 486cfbcba018bb35c0a67efb7c6ee2d10c9feb67 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 3 Jul 2026 13:45:54 +0200
+Subject: [PATCH] boot: zephyr: add ctcc/nrf9151 board configuration
+
+MCUboot shipped serial-recovery board configs for ctcc/nrf52840 and
+ctcc/nrf9161 but not for the ctcc/nrf9151 target that the ctcc
+Connectivity Card board now provides.
+
+- Add boot/zephyr/boards/ctcc_nrf9151.conf, mirroring the nRF9161 card:
+  UART-based serial recovery (the card exposes a UART over its on-board
+  USB-UART converter), no application boot, 5 s DFU wait, SPI NOR off.
+
+Assisted-by: Claude:claude-opus-4-8
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ boot/zephyr/boards/ctcc_nrf9151.conf | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+ create mode 100644 boot/zephyr/boards/ctcc_nrf9151.conf
+
+diff --git a/boot/zephyr/boards/ctcc_nrf9151.conf b/boot/zephyr/boards/ctcc_nrf9151.conf
+new file mode 100644
+index 00000000..da32ec9f
+--- /dev/null
++++ b/boot/zephyr/boards/ctcc_nrf9151.conf
+@@ -0,0 +1,15 @@
++# Disable logging
++CONFIG_LOG=n
++CONFIG_CONSOLE=n
++CONFIG_UART_CONSOLE=n
++
++# MCUboot serial configuration
++CONFIG_MCUBOOT_SERIAL=y
++CONFIG_BOOT_SERIAL_UART=y
++CONFIG_BOOT_SERIAL_ENTRANCE_GPIO=n
++CONFIG_BOOT_SERIAL_WAIT_FOR_DFU=y
++CONFIG_BOOT_SERIAL_NO_APPLICATION=y
++CONFIG_BOOT_SERIAL_WAIT_FOR_DFU_TIMEOUT=5000
++
++# SPI NOR
++CONFIG_SPI_NOR=n
+-- 
+2.43.0
+

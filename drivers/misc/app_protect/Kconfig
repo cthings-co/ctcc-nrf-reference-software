@@ -1,0 +1,53 @@
+# Copyright (c) 2024 CTHINGS.CO
+# SPDX-License-Identifier: Apache-2.0
+
+config CTCC_APP_PROTECT
+	bool "CTHINGS.CO APPROTECT lock helper"
+	depends on !ARM_NONSECURE_FIRMWARE
+	default y
+	help
+	  Compile the app_protect SYS_INIT helper. When CONFIG_NRF_APPROTECT_LOCK is
+	  selected it writes UICR.APPROTECT and resets, making the debug lock
+	  PERMANENT: it survives a power cycle and re-flashing over SWD then needs
+	  `nrfjprog --recover`.
+
+	  SECURE images only. UICR is reachable only from the secure side, so on a
+	  non-secure image the helper could do nothing but add a dead SYS_INIT entry -
+	  hence `depends on !ARM_NONSECURE_FIRMWARE`. On these cards that means the
+	  bootloader does the locking, before any application is installed.
+
+	  What each family needs from it differs, and the helper covers both:
+
+	  nRF52840 has ONE access port, and its UICR word is the only thing that makes a
+	  lock PERMANENT: nothing in Zephyr or NCS writes that word. What NCS does do,
+	  with NRF_APPROTECT_HANDLING at LOCK, is compile the MDK's SystemInit with
+	  ENABLE_APPROTECT, which force-protects the port on every boot. So without this
+	  helper the port is still closed while our firmware runs - it is not "open" -
+	  but the protection is volatile and an erase plus reflash removes it. The helper
+	  is what survives that.
+
+	  nRF91 has TWO, and NCS does handle both: with the NRF_APPROTECT_HANDLING and
+	  NRF_SECURE_APPROTECT_HANDLING choices at LOCK (defaulted at board level),
+	  SystemInit force-protects each on every boot. But FORCEPROTECT is volatile -
+	  it protects a card while our firmware runs and is gone the moment the part is
+	  erased and reflashed. This helper writes both UICR words as well, which is
+	  what makes the lock survive that. The two mechanisms are complementary: NCS
+	  closes the ports early in every boot, the UICR write makes the state
+	  permanent from reset.
+
+	  This applies to a SECURE image, which is the only kind the helper is built
+	  into. In a non-secure (/ns) application TF-M holds the secure side and writes
+	  both UICR words itself, permanently, via nrfx_nvmc_word_write() - so such a
+	  card is already locked for good and the helper is neither present nor needed.
+
+	  Each write is gated on its own choice, so an image that selects
+	  NRF_APPROTECT_LOCK without NRF_SECURE_APPROTECT_LOCK locks only the port it
+	  asked for, and the secure-port write compiles out entirely on nRF52840.
+
+	  Disabling this alone does NOT keep a card debuggable. It removes the permanent
+	  UICR write, but the per-boot force-protect comes from the NRF_APPROTECT_HANDLING
+	  choice, not from here - so a debuggable image also has to select
+	  NRF_APPROTECT_USE_UICR (and, on nRF91, NRF_SECURE_APPROTECT_USE_UICR for the
+	  second port). Set all of them for a build that must stay debuggable: a bring-up
+	  image, a sample, or a hardware test that must not lock the card it qualifies.
+	  The assembly test in this repository is the worked example.

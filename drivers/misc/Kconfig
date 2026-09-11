@@ -1,0 +1,6 @@
+# Miscellaneous drivers not exposing Zephyr Device Driver API
+
+# Copyright (c) 2026 CTHINGS.CO
+# SPDX-License-Identifier: Apache-2.0
+
+rsource "app_protect/Kconfig"

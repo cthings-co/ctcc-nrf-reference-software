@@ -1,0 +1,10 @@
+# The patch files under patches/ are `git format-patch` output and are applied with
+# `git apply`, which matches context lines byte for byte and verifies the blob index
+# recorded in each header. A clone made with core.autocrlf=true would rewrite their
+# line endings on checkout and every patch would then fail to apply, with an error
+# ("patch does not apply") that points at the patch rather than at the clone. Mark
+# them binary-ish so no EOL conversion is ever applied, on any platform.
+patches/** -text
+
+# Same reasoning for the signing keys and any PEM: byte-exact or useless.
+*.pem -text

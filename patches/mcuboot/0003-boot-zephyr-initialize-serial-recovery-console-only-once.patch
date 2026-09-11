@@ -1,0 +1,60 @@
+From 826e6ae863f8dfba04e658347019064dd370c0c9 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Nerijus=20Bend=C5=BEi=C5=ABnas?=
+ <nerijus.bendziunas@gmail.com>
+Date: Mon, 1 Jun 2026 05:21:06 +0300
+Subject: [PATCH] boot: zephyr: initialize serial recovery console only once
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+With CONFIG_BOOT_SERIAL_WAIT_FOR_DFU, boot_console_init() runs twice: once for the DFU wait and again in boot_serial_enter(). The second call re-ran usb_enable(), which returns -EALREADY, so boot_uart_fifo_init() returned -1; since the assert became a FIH_PANIC, serial recovery never started. Initialize only once, which also preserves bytes buffered during the DFU wait.
+
+Fixes #2747
+
+Signed-off-by: Nerijus Bendžiūnas <nerijus.bendziunas@gmail.com>
+(cherry picked from commit f37cb25b6bcbf8a9957bf30ee4639f3c21b1add6)
+---
+ boot/zephyr/serial_adapter.c | 18 +++++++++++++++++-
+ 1 file changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/boot/zephyr/serial_adapter.c b/boot/zephyr/serial_adapter.c
+index fa7c391c..f2e2259e 100644
+--- a/boot/zephyr/serial_adapter.c
++++ b/boot/zephyr/serial_adapter.c
+@@ -115,8 +115,18 @@ console_read(char *str, int str_size, int *newline)
+ int
+ boot_console_init(void)
+ {
++	static bool initialized;
+ 	int i;
+ 
++	/* WAIT_FOR_DFU initializes the console early, then boot_serial_enter()
++	 * initializes it again. Re-running would call usb_enable() a second time
++	 * (returning -EALREADY) and reset the line queues, dropping any bytes
++	 * buffered while waiting. Initialize only once.
++	 */
++	if (initialized) {
++		return 0;
++	}
++
+ 	/* Zephyr UART handler takes an empty buffer from avail_queue,
+ 	 * stores UART input in it until EOL, and then puts it into
+ 	 * lines_queue.
+@@ -128,7 +138,13 @@ boot_console_init(void)
+ 		sys_slist_append(&avail_queue, &line_bufs[i].node);
+ 	}
+ 
+-	return boot_uart_fifo_init();
++	int rc = boot_uart_fifo_init();
++
++	if (rc == 0) {
++		initialized = true;
++	}
++
++	return rc;
+ }
+ 
+ static void
+-- 
+2.43.0
+

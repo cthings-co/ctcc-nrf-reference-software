@@ -1,0 +1,71 @@
+From 0963257225b6d65ddef6fd43178951c3f14dc383 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 3 Jul 2026 13:50:00 +0200
+Subject: [PATCH] boards: ct: ctcc: lock APPROTECT on production firmware
+
+The in-repo ctcc boards set CONFIG_NRF_APPROTECT_LOCK=y, so first boot of a
+secure image locked the UICR APPROTECT debug-access-port protection. Moving the
+board to the upstream NCS Zephyr fork dropped that default, so an image built for
+this board no longer locks the debug port unless it asks for that itself.
+
+Restore it at board level through the NRF_APPROTECT_HANDLING choice default in
+Kconfig.defconfig, so it applies to every ctcc image - application and MCUboot,
+all SoC variants - and default the nRF91-only NRF_SECURE_APPROTECT_HANDLING
+choice to LOCK as well.
+
+The two SoCs then lock by different mechanisms, each the one its part supports:
+
+  nRF52840 has a single access port, protected by a UICR word that nothing in
+  Zephyr or NCS ever writes - SystemInit only loads the soft branch from it. The
+  app_protect SYS_INIT helper (drivers/misc/app_protect, CTCC_APP_PROTECT=y)
+  performs that write and resets on first boot of a secure image, so the lock is
+  permanent and re-flashing over SWD needs `nrfjprog --recover` first.
+
+  nRF91 has two access ports, and NCS handles both: with these choices at LOCK,
+  SystemInit sets APPROTECT.FORCEPROTECT and SECUREAPPROTECT.FORCEPROTECT on
+  every boot. Left at the upstream default the secure port is not merely skipped
+  but actively unprotected - the MDK writes SECUREAPPROTECT.DISABLE when
+  UICR.SECUREAPPROTECT reads HwUnprotected - so a card locked on the non-secure
+  port alone stays fully readable over SWD through the secure one.
+
+Assisted-by: Claude:claude-opus-5[1m]
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ boards/ct/ctcc/Kconfig.defconfig | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/boards/ct/ctcc/Kconfig.defconfig b/boards/ct/ctcc/Kconfig.defconfig
+index c8ebd846a1e..e9ad80dadb9 100644
+--- a/boards/ct/ctcc/Kconfig.defconfig
++++ b/boards/ct/ctcc/Kconfig.defconfig
+@@ -9,5 +9,27 @@ source "boards/common/usb/Kconfig.cdc_acm_serial.defconfig"
+ 
+ endif # BOARD_CTCC_NRF52840
+ 
++# Lock APPROTECT (debug read-back protection) on production ctcc firmware. The
++# app_protect SYS_INIT helper (drivers/misc/app_protect, CTCC_APP_PROTECT=y)
++# writes UICR.APPROTECT and resets on first boot of a secure image; selecting
++# the LOCK choice member here engages it for every ctcc image (app + MCUboot).
++choice NRF_APPROTECT_HANDLING
++	default NRF_APPROTECT_LOCK
++endchoice
++
++# nRF91 has a SECOND access port with its own UICR word, and its choice is left at
++# NRF_SECURE_APPROTECT_USE_UICR upstream - which does not merely skip the secure AP,
++# it actively unprotects it (the MDK writes SECUREAPPROTECT.DISABLE = SwUnprotected
++# when UICR.SECUREAPPROTECT reads HwUnprotected, see system_nrf91_approtect.h). A
++# card locked only on the non-secure AP is still fully readable over SWD through the
++# secure one. Default this choice to LOCK as well so SystemInit force-protects both.
++# The choice depends on the nRF91 series, so on nRF52840 this block is present but
++# INVISIBLE - the Kconfig text is unconditional and at file top level; what the
++# dependency removes is the choice's visibility, so the default simply never applies - which has a single access port and gets its lock from the UICR write
++# performed by drivers/misc/app_protect.
++choice NRF_SECURE_APPROTECT_HANDLING
++	default NRF_SECURE_APPROTECT_LOCK
++endchoice
++
+ config BOARD_CTCC
+ 	select USE_DT_CODE_PARTITION if BOARD_CTCC_NRF9161_NS || BOARD_CTCC_NRF9151_NS
+-- 
+2.43.0
+

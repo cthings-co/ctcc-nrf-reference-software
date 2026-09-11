@@ -1,22 +1,22 @@
 # Copyright (c) 2025 CTHINGS.CO
 # SPDX-License-Identifier: Apache-2.0
 #
-# Config options for CTCC Reference Software
+# Config options for CTCC Reference Software.
+#
+# This repository is a Zephyr module (zephyr/module.yml points `kconfig` here),
+# so this file is sourced into the Kconfig tree of EVERY image of every build it
+# takes part in - application, MCUboot child image, TF-M. Keep it to ctcc-owned
+# symbols; anything added here is global. No `mainmenu` either: the module
+# snippet already wraps this in its own menu, and a `mainmenu` statement would
+# rename the top-level menu of the whole build.
 
-mainmenu "Connectivity Cards Reference Software"
-
-config FIRMWARE_REV
-	string "Firmware revision"
-	default "1.1.0"
-	help
-	  Firmware built-in revision (should be set properly in prj.conf).
-
-config MCUBOOT_IMGTOOL_SIGN_VERSION
-	string "Firmware revision"
-	default "1.1.0"
-	help
-	  MCUboot built-in revision (ideally should be the same as FIRMWARE_REV).
-
+# Emit the .lst disassembly listing for every ctcc image (the CI collects it next
+# to the ELF). This deliberately re-defaults Zephyr's own OUTPUT_DISASSEMBLY,
+# which upstream declares without a default (i.e. n): module Kconfigs are sourced
+# before Kconfig.zephyr's definition and Kconfig honours the first default it
+# sees.
 config OUTPUT_DISASSEMBLY
 	bool "Enable .lst generation"
 	default y
+
+rsource "drivers/Kconfig"
