@@ -1,0 +1,18 @@
+name: CTCC Firmware Release
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    uses: cthings-co/ctcc-nrf-reference-software/.github/workflows/release-firmwares.yml@refs/heads/main
+    with:
+      source_ref: ${{ github.event.release.tag_name }}
+      event_name: ${{ github.event_name }}
+      ref_name: ${{ github.ref_name }}
+      trusted_release: true
+    secrets: inherit

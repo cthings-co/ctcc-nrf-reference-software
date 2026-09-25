@@ -1,0 +1,762 @@
+name: CTCC Firmware Build
+
+on:
+  workflow_call:
+    inputs:
+      source_ref:
+        description: Git ref to build.
+        required: true
+        type: string
+      event_name:
+        description: Event type from the calling workflow.
+        required: true
+        type: string
+      ref_name:
+        description: Branch or tag name from the calling workflow.
+        required: true
+        type: string
+      trusted_release:
+        description: Request the trusted release runner after validation.
+        required: true
+        type: boolean
+
+concurrency:
+  group: ctcc-firmwares-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ARTIFACT_PATH: ${{ github.workspace }}/artifacts
+  ZEPHYR_REPO: ${{ github.workspace }}/../zephyr
+  NRF_REPO: ${{ github.workspace }}/../nrf
+  #
+  #
+  #
+  ZEPHYR_CI_IMAGE: zephyrprojectrtos/ci@sha256:e77ad1d2f9c02e2e4343804c7cfe78c2b89cf15cb32aab083658db94a801ad8d
+  ZEPHYR_CI_IMAGE_TAG: zephyrprojectrtos/ci:v0.29.3
+  ZEPHYR_SDK_INSTALL_DIR: /opt/toolchains/zephyr-sdk-1.0.1
+
+jobs:
+  version-bump-check:
+    name: VERSION bump
+    timeout-minutes: 15
+    if: inputs.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Diff firmware/VERSION against the base revision
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euxo pipefail
+          BASE="$BASE_SHA"
+
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "::error::base revision $BASE is not available; cannot verify the VERSION bump"
+            exit 1
+          fi
+
+          #
+          changed="$(git diff --numstat "$BASE" -- \
+                       firmware drivers dts patches tests .ci_scripts .github \
+                       Kconfig CMakeLists.txt zephyr/module.yml west.yml \
+                       ':(exclude)**/*.md' ':(exclude)LICENSE')"
+          if [ -z "$changed" ]; then
+            echo "No build-affecting change in this pull request; VERSION bump not required."
+            echo "SKIP_VERSION_CHECK=1" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          git diff -U99 "$BASE" -- firmware/VERSION > version_compare.diff
+          cat version_compare.diff
+
+      - name: Require a VERSION bump
+        if: env.SKIP_VERSION_CHECK != '1'
+        shell: bash
+        run: python3 .ci_scripts/check_version_bump.py
+
+  dco-check:
+    name: DCO sign-off
+    timeout-minutes: 15
+    if: inputs.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 0
+
+      - name: Check every commit for a matching Signed-off-by
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          BASE="$BASE_SHA"
+          HEAD="$HEAD_SHA"
+
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null || ! git cat-file -e "$HEAD^{commit}" 2>/dev/null; then
+            echo "::error::pull request range $BASE..$HEAD is not available; cannot verify sign-offs"
+            exit 1
+          fi
+          mapfile -t commits < <(git rev-list --no-merges "$BASE..$HEAD")
+          if [ "${#commits[@]}" -eq 0 ]; then
+            echo "::error::no commits found in $BASE..$HEAD; refusing to pass the DCO check vacuously"
+            exit 1
+          fi
+
+          failed=0
+          for sha in "${commits[@]}"; do
+            [ -n "$sha" ] || continue
+            subject="$(git show -s --format='%s' "$sha")"
+            mapfile -t signoffs < <(git show -s --format='%B' "$sha" \
+              | sed -nE 's/^[Ss]igned-off-by:[[:space:]]*(.+)$/\1/p')
+
+            if [ "${#signoffs[@]}" -eq 0 ]; then
+              echo "::error::$sha (\"$subject\") has no Signed-off-by trailer"
+              failed=1
+              continue
+            fi
+
+            author="$(git show -s --format='%ae' "$sha")"
+            committer="$(git show -s --format='%ce' "$sha")"
+            matched=0
+            for s in "${signoffs[@]}"; do
+              addr="$(printf '%s' "$s" | sed -nE 's/.*<(.+)>.*/\1/p')"
+              shopt -s nocasematch
+              if [[ "$addr" == "$author" || "$addr" == "$committer" ]]; then
+                matched=1
+              fi
+              shopt -u nocasematch
+            done
+            if [ "$matched" -eq 0 ]; then
+              echo "::error::$sha (\"$subject\") is signed off by ${signoffs[*]}," \
+                   "which matches neither the author ($author) nor the committer ($committer)"
+              failed=1
+            fi
+          done
+
+          echo "Checked ${#commits[@]} commit(s) for a matching Signed-off-by."
+          [ "$failed" -eq 0 ]
+
+  validate-release-request:
+    name: Validate trusted release request
+    timeout-minutes: 5
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: read
+
+    outputs:
+      use-self-hosted: ${{ steps.validate.outputs.use-self-hosted }}
+
+    steps:
+      - name: Bind a trusted runner request to the upstream release tag
+        id: validate
+        shell: bash
+        env:
+          CALLER_EVENT: ${{ github.event_name }}
+          CALLER_REF: ${{ github.ref }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ inputs.event_name }}
+          REF_NAME: ${{ inputs.ref_name }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          TRUSTED_RELEASE: ${{ inputs.trusted_release }}
+        run: |
+          set -euo pipefail
+
+          if [ "$TRUSTED_RELEASE" != "true" ]; then
+            echo "use-self-hosted=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if [ "$CALLER_REPOSITORY" != "cthings-co/ctcc-nrf-reference-software" ] \
+             || [ "$CALLER_EVENT" != "release" ] \
+             || [ "$EVENT_NAME" != "release" ] \
+             || [ "$CALLER_REF" != "refs/tags/$SOURCE_REF" ] \
+             || [ "$REF_NAME" != "$SOURCE_REF" ]; then
+            echo "::error::trusted runner requests must originate from an upstream release and build that release tag"
+            exit 1
+          fi
+
+          echo "use-self-hosted=true" >> "$GITHUB_OUTPUT"
+
+  build-matrix:
+    name: Build ${{ matrix.config.name }}
+    timeout-minutes: 60
+    needs: [version-bump-check, dco-check, validate-release-request]
+    runs-on: ${{ needs.validate-release-request.outputs.use-self-hosted == 'true' && fromJSON('["self-hosted", "linux", "x64"]') || 'ubuntu-24.04' }}
+    if: >-
+      !cancelled()
+      && (needs.version-bump-check.result == 'success' || needs.version-bump-check.result == 'skipped')
+      && (needs.dco-check.result == 'success' || needs.dco-check.result == 'skipped')
+      && needs.validate-release-request.result == 'success'
+
+    permissions:
+      contents: read
+
+    outputs:
+      expected-sets: ${{ steps.expected-sets.outputs.count }}
+
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        config:
+          #
+
+          - name: nrf52840-open-bootloader
+            BRD: ctcc
+            SOC: nrf52840
+            APP_NAME: open_bootloader
+            APP_PATH: firmware
+            BUILD_TYPE: bootloader
+            NS: false
+            BUILD_OPTS: ''
+
+          - name: nrf52840-assembly-tests
+            BRD: ctcc
+            SOC: nrf52840
+            APP_NAME: assembly
+            APP_PATH: tests/assembly
+            BUILD_TYPE: test
+            NS: false
+            BUILD_OPTS: ''
+
+          - name: nrf52840-firmware
+            BRD: ctcc
+            SOC: nrf52840
+            APP_NAME: firmware
+            APP_PATH: firmware
+            BUILD_TYPE: firmware
+            NS: false
+            BUILD_OPTS: ''
+
+          - name: nrf9161-open-bootloader
+            BRD: ctcc
+            SOC: nrf9161
+            APP_NAME: open_bootloader
+            APP_PATH: firmware
+            BUILD_TYPE: bootloader
+            NS: true
+            BUILD_OPTS: ''
+
+          - name: nrf9161-assembly-tests
+            BRD: ctcc
+            SOC: nrf9161
+            APP_NAME: assembly
+            APP_PATH: tests/assembly
+            BUILD_TYPE: test
+            NS: true
+            BUILD_OPTS: ''
+
+          - name: nrf9161-firmware
+            BRD: ctcc
+            SOC: nrf9161
+            APP_NAME: firmware
+            APP_PATH: firmware
+            BUILD_TYPE: firmware
+            NS: true
+            BUILD_OPTS: ''
+
+          - name: nrf9151-open-bootloader
+            BRD: ctcc
+            SOC: nrf9151
+            APP_NAME: open_bootloader
+            APP_PATH: firmware
+            BUILD_TYPE: bootloader
+            NS: true
+            BUILD_OPTS: ''
+
+          - name: nrf9151-assembly-tests
+            BRD: ctcc
+            SOC: nrf9151
+            APP_NAME: assembly
+            APP_PATH: tests/assembly
+            BUILD_TYPE: test
+            NS: true
+            BUILD_OPTS: ''
+
+          - name: nrf9151-firmware
+            BRD: ctcc
+            SOC: nrf9151
+            APP_NAME: firmware
+            APP_PATH: firmware
+            BUILD_TYPE: firmware
+            NS: true
+            BUILD_OPTS: ''
+
+    env:
+      ZEPHYR_TOOLCHAIN_VARIANT: zephyr
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Report runner storage before workspace setup
+        shell: bash
+        run: |
+          set -u
+          echo "Runner storage before workspace setup:"
+          df -h || true
+          df -i || true
+          docker system df || true
+
+      - name: Prepare Zephyr SDK / west workspace (container, runner uid, shallow west clone)
+        shell: bash
+        #
+        #
+        env:
+          GITHUB_FETCH_TOKEN: ${{ secrets.NCS_FETCH_TOKEN || github.token }}
+        run: |
+          set -euxo pipefail
+
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          HOST_UID="$(id -u)"
+          HOST_GID="$(id -g)"
+          CONTAINER_HOME="$WORKSPACE_ROOT/.container-home"
+          mkdir -p "$CONTAINER_HOME"
+
+          #
+          #
+          avail_gb() {
+            local gb=""
+            [ -d "$1" ] || return 0
+            gb="$(df -BG --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9')" || gb=""
+            [ -n "$gb" ] || gb="$(df -BG "$1" 2>/dev/null | awk 'NR==2{print $4}' | tr -dc '0-9')" || gb=""
+            printf '%s' "$gb"
+          }
+
+          docker_gb="$(avail_gb /var/lib/docker)"
+          if [ -n "$docker_gb" ] && [ "$docker_gb" -lt 18 ]; then
+            echo "::notice::${docker_gb}G free under /var/lib/docker; reclaiming space"
+            docker system df || true
+            docker image prune -f || true
+            docker container prune -f || true
+            docker builder prune -f || true
+            docker images --format '{{.Repository}}:{{.Tag}}' \
+              | grep '^zephyrprojectrtos/ci:' | grep -vx "$ZEPHYR_CI_IMAGE_TAG" \
+              | xargs -r docker rmi || true
+          else
+            echo "${docker_gb:-unknown}G free under /var/lib/docker; skipping image cleanup"
+          fi
+
+          ws_gb="$(avail_gb "$WORKSPACE_ROOT")"
+          if [ -z "$ws_gb" ]; then
+            echo "::warning::could not measure free space under $WORKSPACE_ROOT"
+          elif [ "$ws_gb" -lt 10 ]; then
+            echo "::error::only ${ws_gb}G free under $WORKSPACE_ROOT; a freshly cloned west workspace (5.6G measured) plus one build tree needs more than that. Reclaim space on the runner before retrying."
+            exit 1
+          elif [ "$ws_gb" -lt 18 ]; then
+            echo "::warning::only ${ws_gb}G free under $WORKSPACE_ROOT; a row needs about 9G, so this is thin enough to be worth looking at"
+            du -h --max-depth=1 "$WORKSPACE_ROOT" 2>/dev/null | sort -h | tail -8 || true
+          else
+            echo "${ws_gb}G free under $WORKSPACE_ROOT"
+          fi
+
+          df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          df -i "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+
+          #
+          stale_ctrs="$(docker ps -q --filter "volume=$WORKSPACE_ROOT" 2>/dev/null || true)"
+          if [ -n "$stale_ctrs" ]; then
+            echo "::warning::container(s) from an earlier run still hold $WORKSPACE_ROOT; stopping them before preparing the workspace: $(echo $stale_ctrs | tr '\n' ' ')"
+            docker stop -t 15 $stale_ctrs || true
+            docker rm -f $stale_ctrs || true
+          fi
+
+          case "$ZEPHYR_CI_IMAGE" in
+            *@sha256:*) ;;
+            *) echo "::error::ZEPHYR_CI_IMAGE must be pinned by digest (name@sha256:...), not by the mutable tag $ZEPHYR_CI_IMAGE"
+               exit 1 ;;
+          esac
+
+          if ! docker image inspect "$ZEPHYR_CI_IMAGE" >/dev/null 2>&1; then
+            for attempt in 1 2 3; do
+              docker pull "$ZEPHYR_CI_IMAGE" && break
+              [ "$attempt" -eq 3 ] && exit 1
+              sleep $((attempt * 5))
+            done
+          fi
+
+          if ! docker image inspect --format '{{range .RepoDigests}}{{println .}}{{end}}' "$ZEPHYR_CI_IMAGE" \
+               | grep -qxF "$ZEPHYR_CI_IMAGE"; then
+            echo "::error::the local toolchain image does not carry the pinned digest $ZEPHYR_CI_IMAGE; refusing to build"
+            docker image inspect --format 'local repo digests: {{.RepoDigests}} image id: {{.Id}}' "$ZEPHYR_CI_IMAGE" || true
+            exit 1
+          fi
+          echo "toolchain image: $ZEPHYR_CI_IMAGE (tag $ZEPHYR_CI_IMAGE_TAG, Zephyr SDK $ZEPHYR_SDK_INSTALL_DIR)"
+
+          docker run --rm \
+            -u "$HOST_UID:$HOST_GID" \
+            -v "$WORKSPACE_ROOT:$WORKSPACE_ROOT" \
+            -w "$GITHUB_WORKSPACE" \
+            -e GITHUB_WORKSPACE \
+            -e HOME="$CONTAINER_HOME" \
+            -e ZEPHYR_REPO \
+            -e NRF_REPO \
+            -e GITHUB_FETCH_TOKEN \
+            "$ZEPHYR_CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+              bash "$GITHUB_WORKSPACE/.ci_scripts/prepare_workspace.sh"
+            '
+
+      - name: Remove the github.com fetch credential from the runner
+        if: always()
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          CONTAINER_HOME="$(dirname "$GITHUB_WORKSPACE")/.container-home"
+          rm -f "$CONTAINER_HOME/.git-credentials" || true
+
+      - name: Report runner storage after workspace setup
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          echo "Runner storage after workspace setup:"
+          df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          df -i "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          du -sh "$GITHUB_WORKSPACE" "$WORKSPACE_ROOT/nrf" "$WORKSPACE_ROOT/zephyr" \
+            "$WORKSPACE_ROOT/modules" "$WORKSPACE_ROOT/bootloader" 2>/dev/null || true
+          docker system df || true
+
+      - name: Build firmware in Zephyr container (non-root)
+        shell: bash
+        env:
+          BRD: ${{ matrix.config.BRD }}
+          SOC: ${{ matrix.config.SOC }}
+          APP_NAME: ${{ matrix.config.APP_NAME }}
+          IMAGE_NAME: ${{ matrix.config.IMAGE_NAME || matrix.config.APP_NAME }}
+          BUILD_OPTS: "${{ matrix.config.BUILD_OPTS }}"
+          NS: ${{ matrix.config.NS || 'false' }}
+          MATRIX_APP_PATH: ${{ matrix.config.APP_PATH }}
+          BUILD_TYPE: ${{ matrix.config.BUILD_TYPE }}
+          CI_ARTIFACT_SANITIZATION: "1"
+        run: |
+          set -euxo pipefail
+
+          export APP_PATH="$GITHUB_WORKSPACE/$MATRIX_APP_PATH"
+
+
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          HOST_UID="$(id -u)"
+          HOST_GID="$(id -g)"
+          CONTAINER_HOME="$WORKSPACE_ROOT/.container-home"
+          mkdir -p "$CONTAINER_HOME"
+
+          docker run --rm \
+            -u "$HOST_UID:$HOST_GID" \
+            -v "$WORKSPACE_ROOT:$WORKSPACE_ROOT" \
+            -w "$GITHUB_WORKSPACE" \
+            -e GITHUB_WORKSPACE \
+            -e HOME="$CONTAINER_HOME" \
+            -e ZEPHYR_REPO \
+            -e NRF_REPO \
+            -e ZEPHYR_TOOLCHAIN_VARIANT \
+            -e ZEPHYR_SDK_INSTALL_DIR \
+            -e BRD \
+            -e SOC \
+            -e APP_NAME \
+            -e IMAGE_NAME \
+            -e BUILD_OPTS \
+            -e NS \
+            -e APP_PATH \
+            -e BUILD_TYPE \
+            -e CI_ARTIFACT_SANITIZATION \
+            -e GITHUB_EVENT_NAME \
+            "$ZEPHYR_CI_IMAGE" \
+            bash -lc '
+              set -euxo pipefail
+              . "$HOME/venv/bin/activate"
+              cd "$APP_PATH"
+              bash "$GITHUB_WORKSPACE/.ci_scripts/build_sdk.sh"
+            '
+
+      - name: Report runner storage after build
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          echo "Runner storage after build:"
+          df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          df -i "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          du -sh "$GITHUB_WORKSPACE" "$WORKSPACE_ROOT/nrf" "$WORKSPACE_ROOT/zephyr" \
+            "$WORKSPACE_ROOT/modules" "$WORKSPACE_ROOT/bootloader" "$ARTIFACT_PATH" \
+            2>/dev/null || true
+          docker system df || true
+
+      - name: Collect Artifacts
+        shell: bash
+        env:
+          BRD: ${{ matrix.config.BRD }}
+          SOC: ${{ matrix.config.SOC }}
+          APP: ${{ matrix.config.APP_NAME }}
+          IMAGE_NAME: ${{ matrix.config.IMAGE_NAME || matrix.config.APP_NAME }}
+          BUILD_TYPE: ${{ matrix.config.BUILD_TYPE }}
+          MATRIX_APP_PATH: ${{ matrix.config.APP_PATH }}
+        run: |
+          set -euxo pipefail
+
+          SOC_SAFE="$(printf '%s' "$SOC" | tr '/' '_')"
+          echo "SOC_SAFE=$SOC_SAFE" >> "$GITHUB_ENV"
+
+          APP_PATH="$GITHUB_WORKSPACE/$MATRIX_APP_PATH"
+          DEST="$ARTIFACT_PATH/$BRD/$SOC_SAFE"
+          PREFIX="${BRD}_${SOC_SAFE}"
+          mkdir -p "$DEST"
+
+          #
+          STAMP="$(date -u +%Y%m%d)"
+          if [ "${GITHUB_EVENT_NAME:-}" != "release" ]; then
+            STAMP="${STAMP}-${GITHUB_SHA:0:8}"
+          fi
+
+          if [ ! -f "$GITHUB_WORKSPACE/python-requirements.lock" ]; then
+            echo "::error::python-requirements.lock missing: prepare_workspace.sh did not record the build environment"
+            exit 1
+          fi
+          cp "$GITHUB_WORKSPACE/python-requirements.lock" \
+             "$DEST/${PREFIX}_python-requirements_${STAMP}.lock"
+
+          need() {
+            if [ ! -f "$1" ]; then
+              echo "::error::required artifact missing: $1 (build produced no such file)"
+              exit 1
+            fi
+            mv "$1" "$2"
+          }
+          want() {
+            if [ -f "$1" ]; then mv "$1" "$2"; fi
+          }
+
+          if [ "$BUILD_TYPE" = "bootloader" ]; then
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.elf" "$DEST/${PREFIX}_open_bootloader_${STAMP}.elf"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.bin" "$DEST/${PREFIX}_open_bootloader_${STAMP}.bin"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.hex" "$DEST/${PREFIX}_open_bootloader_${STAMP}.hex"
+            want "$APP_PATH/build/mcuboot/zephyr/zephyr.lst" "$DEST/${PREFIX}_open_bootloader_${STAMP}.lst"
+          elif [ "$BUILD_TYPE" = "firmware" ]; then
+            need "$APP_PATH/build/$IMAGE_NAME/zephyr/zephyr.signed.bin" "$DEST/${PREFIX}_${APP}_${STAMP}.signed.bin"
+            need "$APP_PATH/build/merged.hex"                           "$DEST/${PREFIX}_${APP}_${STAMP}.merged.hex"
+            need "$APP_PATH/build/mcuboot/zephyr/zephyr.hex"            "$DEST/${PREFIX}_${APP}_mcuboot_${STAMP}.hex"
+            want "$APP_PATH/build/$IMAGE_NAME/zephyr/zephyr.lst"        "$DEST/${PREFIX}_${APP}_${STAMP}.lst"
+            want "$APP_PATH/build/mcuboot/zephyr/zephyr.lst"            "$DEST/${PREFIX}_${APP}_mcuboot_${STAMP}.lst"
+            #
+            if [ -f "$APP_PATH/build/dfu_application.zip" ]; then
+              need "$APP_PATH/build/dfu_application.zip" \
+                   "$DEST/${PREFIX}_${APP}_dfu_application_${STAMP}.zip"
+              need "$APP_PATH/build/dfu_application.zip_manifest.json" \
+                   "$DEST/${PREFIX}_${APP}_dfu_application_${STAMP}.manifest.json"
+            else
+              echo "::warning::no dfu_application.zip for ${PREFIX}_${APP}; this build published no mcumgr update package"
+            fi
+          else
+            need "$APP_PATH/build/zephyr/zephyr.elf" "$DEST/${PREFIX}_${APP}_${STAMP}.elf"
+            need "$APP_PATH/build/zephyr/zephyr.bin" "$DEST/${PREFIX}_${APP}_${STAMP}.bin"
+            need "$APP_PATH/build/zephyr/zephyr.hex" "$DEST/${PREFIX}_${APP}_${STAMP}.hex"
+            want "$APP_PATH/build/zephyr/zephyr.lst" "$DEST/${PREFIX}_${APP}_${STAMP}.lst"
+            case "$SOC" in
+              nrf91*) need "$APP_PATH/build/zephyr/tfm_merged.hex" "$DEST/${PREFIX}_${APP}_tfm_merged_${STAMP}.hex" ;;
+              *)      want "$APP_PATH/build/zephyr/tfm_merged.hex" "$DEST/${PREFIX}_${APP}_tfm_merged_${STAMP}.hex" ;;
+            esac
+          fi
+
+          if [ "$BUILD_TYPE" = "bootloader" ]; then
+            SBOM_NAME="${PREFIX}_open_bootloader_sbom"
+          else
+            SBOM_NAME="${PREFIX}_${APP}_sbom"
+          fi
+          #
+          sbom_labels=()
+          case "$BUILD_TYPE" in
+            bootloader) sbom_labels=(mcuboot) ;;
+            firmware)   sbom_labels=("$APP" mcuboot) ;;
+            *)          sbom_labels=("$APP") ;;
+          esac
+          sbom_missing=""
+          for sbom_label in "${sbom_labels[@]}"; do
+            for sbom_ext in html spdx; do
+              if [ ! -s "$APP_PATH/build/sbom/$sbom_label.sbom.$sbom_ext" ]; then
+                sbom_missing="$sbom_missing $sbom_label.sbom.$sbom_ext"
+              fi
+            done
+          done
+          if [ -n "$sbom_missing" ] && [ "${GITHUB_EVENT_NAME:-}" = "release" ]; then
+            echo "::error::missing or empty SBOM for $SBOM_NAME:$sbom_missing - a release must ship one per image"
+            exit 1
+          fi
+          if [ -n "$sbom_missing" ]; then
+            echo "::warning::missing or empty SBOM for $SBOM_NAME:$sbom_missing"
+          fi
+          if [ -d "$APP_PATH/build/sbom" ] && [ -n "$(ls -A "$APP_PATH/build/sbom")" ]; then
+            SBOM_DEST="$DEST/$SBOM_NAME"
+            mkdir -p "$SBOM_DEST"
+            cp -r "$APP_PATH/build/sbom/." "$SBOM_DEST/"
+          fi
+
+          bash "$GITHUB_WORKSPACE/.ci_scripts/verify_artifact_paths.sh" \
+            "$DEST" "$GITHUB_WORKSPACE" "$(dirname "$GITHUB_WORKSPACE")" \
+            "$ZEPHYR_SDK_INSTALL_DIR"
+
+          ( cd "$DEST" \
+            && find . -type f ! -name SHA256SUMS -printf '%P\0' | sort -z \
+               | xargs -0 -r sha256sum > SHA256SUMS )
+          if [ ! -s "$DEST/SHA256SUMS" ]; then
+            echo "ERROR: no artifacts collected in $DEST - nothing to checksum" >&2
+            exit 1
+          fi
+          ( cd "$DEST" && sha256sum -c --quiet SHA256SUMS )
+          cat "$DEST/SHA256SUMS"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ matrix.config.name }}
+          path: ${{ env.ARTIFACT_PATH }}/${{ matrix.config.BRD }}/${{ env.SOC_SAFE }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Record the expected artifact-set count
+        id: expected-sets
+        shell: bash
+        env:
+          JOB_TOTAL: ${{ strategy.job-total }}
+        run: |
+          set -euo pipefail
+          echo "count=$JOB_TOTAL" >> "$GITHUB_OUTPUT"
+
+      #
+      - name: Release the west workspace back to the runner
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKSPACE_ROOT="$(dirname "$GITHUB_WORKSPACE")"
+          before="$(df -BG --output=avail "$WORKSPACE_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true)"
+
+          for p in bootloader modules tools test nrfxlib zephyr nrf .west; do
+            rm -rf "$WORKSPACE_ROOT/$p"
+          done
+
+          after="$(df -BG --output=avail "$WORKSPACE_ROOT" 2>/dev/null | tail -1 | tr -dc '0-9' || true)"
+          if [ -n "$before" ] && [ -n "$after" ]; then
+            echo "::notice::released the west workspace: ${before}G -> ${after}G free under $WORKSPACE_ROOT"
+          else
+            echo "released the west workspace under $WORKSPACE_ROOT"
+          fi
+          df -h "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          df -i "$WORKSPACE_ROOT" /var/lib/docker 2>/dev/null || true
+          docker system df || true
+
+  package:
+    name: Package Firmware Artifacts
+    timeout-minutes: 30
+    needs: [build-matrix, validate-release-request]
+    runs-on: ${{ needs.validate-release-request.outputs.use-self-hosted == 'true' && fromJSON('["self-hosted", "linux", "x64"]') || 'ubuntu-24.04' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.source_ref }}
+          clean: true
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Clean the package workspace
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          #
+          missing=""
+          for tool in zip sha256sum find; do
+            command -v "$tool" >/dev/null 2>&1 || missing="$missing $tool"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::this runner is missing:$missing - the package job needs them to verify, archive and checksum the release"
+            exit 1
+          fi
+
+          rm -rf all_artifacts
+          rm -f ./*.zip ./*.zip.sha256
+
+      - name: Download artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: all_artifacts
+
+      - name: Verify artifact checksums
+        shell: bash
+        env:
+          EXPECTED_SETS: ${{ needs.build-matrix.outputs.expected-sets }}
+        run: |
+          set -euo pipefail
+          bash .ci_scripts/verify_checksums.sh all_artifacts
+
+      - name: Zip all artifacts
+        shell: bash
+        env:
+          REF_NAME: ${{ inputs.ref_name }}
+          SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ inputs.event_name }}
+        run: |
+          set -euxo pipefail
+          REF_SAFE="$(printf '%s' "$REF_NAME" | tr '/' '-')"
+          PKG_NAME="ctcc-firmwares-${REF_SAFE}-${SHA:0:8}-$(date -u +%Y%m%d)"
+          if [[ "$EVENT_NAME" == "release" ]]; then
+            PKG_NAME="ctcc-firmwares-${REF_SAFE}"
+          fi
+          cd all_artifacts
+          zip -r "$PKG_NAME.zip" .
+          mv "$PKG_NAME.zip" ..
+          cd ..
+          sha256sum "$PKG_NAME.zip" > "$PKG_NAME.zip.sha256"
+          sha256sum -c "$PKG_NAME.zip.sha256"
+          cat "$PKG_NAME.zip.sha256"
+          echo "PKG_NAME=$PKG_NAME" >> "$GITHUB_ENV"
+
+      - name: Upload final package (artifact)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: firmware-package
+          path: |
+            ${{ github.workspace }}/${{ env.PKG_NAME }}.zip
+            ${{ github.workspace }}/${{ env.PKG_NAME }}.zip.sha256
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: inputs.event_name == 'release'
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          fail_on_unmatched_files: true
+          files: |
+            ${{ env.PKG_NAME }}.zip
+            ${{ env.PKG_NAME }}.zip.sha256
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

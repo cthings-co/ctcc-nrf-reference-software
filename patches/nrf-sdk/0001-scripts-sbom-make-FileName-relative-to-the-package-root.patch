@@ -1,0 +1,211 @@
+From fccecb80774560cef9ed32d256f3985fa1de1a2d Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 18 Sep 2026 13:38:06 +0200
+Subject: [PATCH 1/5] scripts: sbom: make FileName relative to the package root
+
+Backport of upstream nrfconnect/sdk-nrf#30566 ("scripts: sbom: Make FileName
+relative to the package root", Nicolae Dicu), which is still open against main.
+
+west ncs-sbom emitted every SPDX FileName relative to the OUTPUT directory:
+
+    relative_path(file, output_directory) -> './' + os.path.relpath(...)
+
+so any file outside the workspace came out as a ../ ladder - a toolchain header
+was recorded as ./../../../../opt/toolchains/zephyr-sdk-X/... That is both a
+disclosure of the build machine's layout and wrong per SPDX 2.3 clause 8.1,
+which says FileName is relative to the PACKAGE root.
+
+Record each package's root directory and emit FileName relative to it. The
+toolchain package already knows its root, and a git package's root is the
+repository top level.
+
+- data_structure: Package.root_path.
+- input_build: set it on the toolchain package.
+- git_info_detector: set it on a git package, from `git rev-parse
+  --show-toplevel`. Upstream has a module_root to hand at this point; this
+  branch does not, so it is derived here with a helper shaped like get_sha().
+- output_template: package_roots(), strip_anchor() and spdx_file_name() are
+  taken verbatim from upstream, including the fallback chain - package root,
+  else the workspace-relative path when it does not escape the workspace, else
+  the absolute path with its anchor stripped.
+- raport.spdx.jinja: call spdx_file_name(file) instead of
+  relative_path(file.file_path).
+
+Function names and bodies are kept identical to upstream so that adopting the
+merged version is a revert of this patch rather than a merge.
+
+This covers the SPDX output only, as upstream's change does. report.html.jinja
+still emits file_path verbatim inside a file:/// link, so the .html half of an
+SBOM continues to carry absolute paths and still needs scrubbing after
+generation.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+Upstream-Status: Adapted backport [https://github.com/nrfconnect/sdk-nrf/commit/36cbccb4476e0bea02ca3d128a86e262e7d45a47]
+---
+ scripts/west_commands/sbom/data_structure.py  |  3 ++
+ .../west_commands/sbom/git_info_detector.py   | 11 +++++
+ scripts/west_commands/sbom/input_build.py     |  1 +
+ scripts/west_commands/sbom/output_template.py | 41 ++++++++++++++++---
+ .../sbom/templates/raport.spdx.jinja          |  2 +-
+ 5 files changed, 52 insertions(+), 6 deletions(-)
+
+diff --git a/scripts/west_commands/sbom/data_structure.py b/scripts/west_commands/sbom/data_structure.py
+index 4ba80ed8b0..8d740208a7 100644
+--- a/scripts/west_commands/sbom/data_structure.py
++++ b/scripts/west_commands/sbom/data_structure.py
+@@ -79,6 +79,8 @@ class Package(DataBaseClass):
+         purl           Package URL (PURL) identifier
+         cpe            Common Platform Enumeration (CPE) identifier
+         dependencies   List of package IDs this package depends on
++        root_path      Absolute path of the package root directory. SPDX file names are
++                       relative to it. None if the root is unknown.
+     '''
+     id: str = ''
+     name: 'str|None' = None
+@@ -89,6 +91,7 @@ class Package(DataBaseClass):
+     purl: 'str|None' = None
+     cpe: 'str|None' = None
+     dependencies: 'list[str]' = list()
++    root_path: 'Path|None' = None
+ 
+ 
+ class LicenseExpr(DataBaseClass):
+diff --git a/scripts/west_commands/sbom/git_info_detector.py b/scripts/west_commands/sbom/git_info_detector.py
+index 6316e833a2..07f809b50e 100644
+--- a/scripts/west_commands/sbom/git_info_detector.py
++++ b/scripts/west_commands/sbom/git_info_detector.py
+@@ -127,6 +127,15 @@ def get_sha(absolute_path: Path) -> 'str|None':
+     return output if (len(output) == 40) and (error_code == 0) else None
+ 
+ 
++def get_toplevel(absolute_path: Path) -> 'Path|None':
++    ''' Returns the root directory of the git repository containing the path. '''
++    output, error_code = command_execute(args.git, 'rev-parse', '--show-toplevel',
++                                         cwd=absolute_path, return_error_code=True,
++                                         allow_stderr=True)
++    output = output.strip()
++    return Path(output) if (len(output) > 0) and (error_code == 0) else None
++
++
+ def detect_dir(func_args: 'tuple[list[FileInfo],Data]') -> None:
+     '''Read input file content and try to detect licenses by its content.'''
+     files = func_args[0]
+@@ -139,6 +148,7 @@ def detect_dir(func_args: 'tuple[list[FileInfo],Data]') -> None:
+     absolute_path = Path(files_to_assign[0].file_path).parent
+     relative_path = Path(files_to_assign[0].file_rel_path).parent
+     git_sha = get_sha(absolute_path)
++    module_root = get_toplevel(absolute_path)
+     git_origin = get_origin(absolute_path, relative_path)
+     if (git_sha is not None) and (git_origin is not None):
+         package_id = f'git#{git_origin}#{git_sha}'.upper()
+@@ -162,6 +172,7 @@ def detect_dir(func_args: 'tuple[list[FileInfo],Data]') -> None:
+         package.id = package_id
+         package.url = git_origin
+         package.version = git_sha
++        package.root_path = module_root
+         if git_origin and git_sha:
+             package.purl = git_url_to_purl(git_origin, git_sha)
+             package.supplier = args.package_supplier or extract_supplier_from_url(git_origin)
+diff --git a/scripts/west_commands/sbom/input_build.py b/scripts/west_commands/sbom/input_build.py
+index f7fa0af353..b162a17eb2 100644
+--- a/scripts/west_commands/sbom/input_build.py
++++ b/scripts/west_commands/sbom/input_build.py
+@@ -269,6 +269,7 @@ def register_toolchain_for_build(data: Data, build_dir: Path):
+     package.name = pkg_name
+     package.url = str(resolved)
+     package.version = pkg_version
++    package.root_path = resolved
+     if args.package_supplier:
+         package.supplier = args.package_supplier
+     data.toolchain_paths[resolved_str] = package.id
+diff --git a/scripts/west_commands/sbom/output_template.py b/scripts/west_commands/sbom/output_template.py
+index 603df1efea..1f76ef42bc 100644
+--- a/scripts/west_commands/sbom/output_template.py
++++ b/scripts/west_commands/sbom/output_template.py
+@@ -57,25 +57,56 @@ def counter() -> int:
+     return counter_value
+ 
+ 
+-def relative_path(file: 'str|Path', output_directory: Path) -> str:
+-    return './' + os.path.relpath(Path(file).resolve(), output_directory)
++def package_roots(data: Data) -> 'dict[str,Path]':
++    '''Resolved root directory of each package that provides one.'''
++    roots = {}
++    for package_id, package in data.packages.items():
++        if package.root_path is None:
++            continue
++        try:
++            roots[package_id] = Path(package.root_path).resolve()
++        except OSError:
++            continue
++    return roots
++
++
++def strip_anchor(path: Path) -> str:
++    '''POSIX form of an absolute path.'''
++    return path.relative_to(path.anchor).as_posix() if path.anchor else path.as_posix()
++
++
++def spdx_file_name(file: FileInfo, roots: 'dict[str,Path]') -> str:
++    '''SPDX FileName of a file: a POSIX path relative to the root of its package.
++    See SPDX 2.3 clause 8.1: the name is relative to the package root and starts with "./".
++    '''
++    root = roots.get(file.package)
++    if root is not None:
++        try:
++            return './' + Path(file.file_path).resolve().relative_to(root).as_posix()
++        except (ValueError, OSError):
++            pass
++    workspace_path = Path(file.file_rel_path)
++    if not workspace_path.is_absolute() and '..' not in workspace_path.parts:
++        return './' + workspace_path.as_posix()
++    return './' + strip_anchor(Path(file.file_path).resolve())
+ 
+ 
+ def timestamp() -> str:
+     return datetime.now(timezone.utc).isoformat(timespec='seconds').replace('+00:00', 'Z')
+ 
+ 
+-def data_to_dict(data: Data, output_directory: Path) -> dict:
++def data_to_dict(data: Data) -> dict:
+     '''Convert object to dict by copying public attributes to a new dictionary.'''
+     result = dict()
+     for name in dir(data):
+         if name.startswith('_'):
+             continue
+         result[name] = getattr(data, name)
++    roots = package_roots(data)
+     result['func'] = {
+         'group_by': group_by,
+         'counter': counter,
+-        'relative_path': lambda file: relative_path(file, output_directory),
++        'spdx_file_name': lambda file: spdx_file_name(file, roots),
+         'timestamp': timestamp
+     }
+     return result
+@@ -88,7 +119,7 @@ def generate(data: Data, output_file: 'Path|str', template_file: Path):
+     with open(template_file) as fd:
+         template_source = fd.read()
+     t = Template(template_source)
+-    out = t.render(**data_to_dict(data, output_file.parent.resolve()))
++    out = t.render(**data_to_dict(data))
+     with open(output_file, 'w') as fd:
+         fd.write(out)
+     escaped_path = quote(str(output_file.resolve()).replace(os.sep, '/').strip("/"))
+diff --git a/scripts/west_commands/sbom/templates/raport.spdx.jinja b/scripts/west_commands/sbom/templates/raport.spdx.jinja
+index cee454c675..06650df86c 100644
+--- a/scripts/west_commands/sbom/templates/raport.spdx.jinja
++++ b/scripts/west_commands/sbom/templates/raport.spdx.jinja
+@@ -63,7 +63,7 @@ PackageCopyrightText: NOASSERTION
+ 
+ # File
+ 
+-FileName: {{func.relative_path(file.file_path)}}
++FileName: {{func.spdx_file_name(file)}}
+ SPDXID: {{file_refs[file.file_path]}}
+ FileChecksum: SHA1: {{file.sha1}}
+ {% if file.local_modifications -%}
+-- 
+2.47.3
+

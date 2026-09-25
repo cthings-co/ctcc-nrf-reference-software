@@ -1,0 +1,73 @@
+From eb7a02eb0954bce4e1c885ec59275abe7a81ca03 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 18 Sep 2026 14:02:51 +0200
+Subject: [PATCH 4/5] scripts: sbom: record the input build directory relative
+ to the workspace
+
+The report header lists what it was generated from, and recorded the build
+directory absolutely:
+
+    The "zephyr/zephyr.elf" file from the build directory "/builds/<group>/<project>/build/app"
+
+which put the workspace root back into every .sbom.html after the file lists had
+been made relative. It was the last absolute path left in the report.
+
+Record it relative to the west topdir, falling back to the absolute form only if
+the build directory lies outside the workspace and no relative form exists.
+
+No upstream change covers this; nrfconnect/sdk-nrf#30566 makes SPDX FileName
+package-relative and does not touch the input list.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ scripts/west_commands/sbom/input_build.py | 19 +++++++++++++++++--
+ 1 file changed, 17 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/west_commands/sbom/input_build.py b/scripts/west_commands/sbom/input_build.py
+index 6b2b2e1baf..564cd1c7a4 100644
+--- a/scripts/west_commands/sbom/input_build.py
++++ b/scripts/west_commands/sbom/input_build.py
+@@ -128,6 +128,21 @@ def get_ninja_default_targets(build_dir: Path) -> list[str]:
+     return [DEFAULT_GN_TARGET]
+ 
+ 
++def input_build_dir_name(build_dir: Path) -> str:
++    '''Build directory as it should appear in the report: relative to the workspace.
++
++    The absolute form names the machine that ran the build, and this string is published
++    inside every .sbom.html. os.path.relpath is only used when it does not have to climb
++    out of the workspace, so a build directory outside it is still reported truthfully.
++    '''
++    resolved = build_dir.resolve()
++    try:
++        rel = os.path.relpath(resolved, util.west_topdir())
++    except (ValueError, OSError):
++        return str(resolved)
++    return rel if not rel.startswith('..') else str(resolved)
++
++
+ class MapFileItem(DataBaseClass):
+     '''
+     Holds information about a single entry extracted from a map file.
+@@ -724,7 +739,7 @@ class InputBuild:
+                     artifact = get_runner_artifact(self.build_dir)
+                     if artifact is not None:
+                         self.data.inputs.append(f'The "{artifact}" file from the build directory '
+-                                    f'"{self.build_dir.resolve()}"')
++                                    f'"{input_build_dir_name(self.build_dir)}"')
+                         self.add_file_info(artifact)
+                         return
+                 raise SbomException(f'Cannot find map file for "{target_with_map}" '
+@@ -734,7 +749,7 @@ class InputBuild:
+             targets.append(target)
+             maps.append(map_file)
+             self.data.inputs.append(f'The "{target}" file from the build directory '
+-                                    f'"{self.build_dir.resolve()}"')
++                                    f'"{input_build_dir_name(self.build_dir)}"')
+ 
+         # Detect external tools
+         ext_detector = ExternalToolDetector()
+-- 
+2.47.3
+

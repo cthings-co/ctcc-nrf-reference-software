@@ -74,6 +74,10 @@ target/
 compliance.xml
 _error.types
 
+# Written by .ci_scripts/prepare_workspace.sh (pip freeze of the build venv) and
+# published as an artifact by the workflow; never committed from a local run.
+/python-requirements.lock
+
 # Tag files
 GPATH
 GRTAGS
@@ -106,3 +110,7 @@ Ruff.txt
 SphinxLint.txt
 TextEncoding.txt
 YAMLLint.txt
+
+# Installed by .ci_scripts/build_sdk.sh from firmware/VERSION for applications
+# built from their own directory; not a tracked file.
+/tests/assembly/VERSION

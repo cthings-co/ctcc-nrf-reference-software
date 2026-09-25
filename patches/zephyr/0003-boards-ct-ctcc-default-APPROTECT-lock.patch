@@ -1,0 +1,43 @@
+From fbf026d966c138adbf10c3784fdad0a510943fe1 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Thu, 24 Sep 2026 11:34:29 +0200
+Subject: [PATCH] boards: ct: ctcc: default APPROTECT lock
+
+Set the ctcc board defaults for debug read-back protection.
+
+- Default the regular and secure APPROTECT choices to LOCK.
+- Keep the setting overridable by reference configurations.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ boards/ct/ctcc/Kconfig.defconfig | 14 ++++++++++++++
+ 1 file changed, 14 insertions(+)
+
+diff --git a/boards/ct/ctcc/Kconfig.defconfig b/boards/ct/ctcc/Kconfig.defconfig
+index c8ebd846a1e..5f9c248a614 100644
+--- a/boards/ct/ctcc/Kconfig.defconfig
++++ b/boards/ct/ctcc/Kconfig.defconfig
+@@ -9,5 +9,19 @@ source "boards/common/usb/Kconfig.cdc_acm_serial.defconfig"
+ 
+ endif # BOARD_CTCC_NRF52840
+ 
++# Default debug read-back protection for ctcc images. The app_protect SYS_INIT
++# helper (drivers/misc/app_protect, CTCC_APP_PROTECT=y) writes
++# UICR.APPROTECT and resets on first boot of a secure image.
++choice NRF_APPROTECT_HANDLING
++	default NRF_APPROTECT_LOCK
++endchoice
++
++# nRF91 has a second access port with its own UICR word. Default this choice to
++# LOCK as well so SystemInit force-protects both ports. The choice depends on
++# the nRF91 series, so this default does not apply on nRF52840.
++choice NRF_SECURE_APPROTECT_HANDLING
++	default NRF_SECURE_APPROTECT_LOCK
++endchoice
++
+ config BOARD_CTCC
+ 	select USE_DT_CODE_PARTITION if BOARD_CTCC_NRF9161_NS || BOARD_CTCC_NRF9151_NS
+-- 
+2.47.3
+
