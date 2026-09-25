@@ -676,6 +676,10 @@ jobs:
     name: Package Firmware Artifacts
     timeout-minutes: 30
     needs: [build-matrix, validate-release-request]
+    if: >-
+      !cancelled()
+      && needs.build-matrix.result == 'success'
+      && needs.validate-release-request.result == 'success'
     runs-on: ${{ needs.validate-release-request.outputs.use-self-hosted == 'true' && fromJSON('["self-hosted", "linux", "x64"]') || 'ubuntu-24.04' }}
 
     steps:
