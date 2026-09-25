@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   build-and-publish:
-    uses: cthings-co/ctcc-nrf-reference-software/.github/workflows/release-firmwares.yml@refs/heads/main
+    uses: cthings-co/ctcc-nrf-reference-software/.github/workflows/release-firmwares.yml@main
     with:
       source_ref: ${{ github.event.release.tag_name }}
       event_name: ${{ github.event_name }}
