@@ -1,0 +1,118 @@
+From d3a8d90ba8f450eaf27f76c2152f630bcd1a4c1a Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Mon, 21 Sep 2026 17:59:56 +0200
+Subject: [PATCH 4/4] cmake: strip build paths from debug info, not just
+ __FILE__
+
+CONFIG_BUILD_OUTPUT_STRIP_PATHS applies -fmacro-prefix-map, which rewrites only
+__FILE__. Debug information is untouched, so every .elf carries the absolute
+path of the machine that built it and CI publishes those .elf files.
+
+-ffile-prefix-map implies both -fmacro-prefix-map and -fdebug-prefix-map, so one
+flag covers both. The three mappings and their order are unchanged, so __FILE__
+strings keep the values they had (WEST_TOPDIR/..., ZEPHYR_BASE/...) and no image
+content changes. A mapping for the toolchain covers headers outside those roots,
+and CMAKE_BINARY_DIR covers generated sources and DW_AT_comp_dir when an
+application is built outside the workspace.
+
+Current GCC forwards -ffile-prefix-map to gas, but explicit
+-Wa,--debug-prefix-map mappings remain compatibility insurance for an older or
+differently configured driver. They are attached only to ASM compilation:
+zephyr_cc_option() would also put -Wa on C and C++, where GCC serializes it into
+LTO objects and lto-wrapper warns and drops assembler options at link time.
+
+zephyr_cc_option() probes the C flags and zephyr_check_compiler_flag() probes
+the assembler driver, so an unsupported option preserves the previous behavior
+rather than failing the build. With CONFIG_LTO the same file-prefix mappings are
+also passed on the link line, because LTO re-emits code there.
+
+The A/B was measured on v3.2.4: an app .elf went from 2086 occurrences of the
+workspace root and 814 of the toolchain path to zero of each, its MCUboot sibling
+from 545 and 219 to zero, with flashed images unchanged. This profile shares the
+same implementation and is covered by the artifact sweep.
+
+The cost is that a debugger no longer finds sources by absolute path; point it
+at the tree with, for example:
+
+    set substitute-path WEST_TOPDIR /path/to/workspace
+
+Prebuilt vendor binaries linked into an image were compiled elsewhere and keep
+whatever paths they were built with; no flag here can change them, and they are
+not this project's build paths.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ CMakeLists.txt | 55 +++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index f84a32ac1e9..5e2ed0e6f2c 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -631,10 +631,59 @@ if(CONFIG_BUILD_OUTPUT_STRIP_PATHS)
+   # If several match then the last one wins. This matters for instances
+   # like tests/ and samples/: they're inside all of them! Then let's
+   # strip as little as possible.
+-  zephyr_cc_option(-fmacro-prefix-map=${CMAKE_SOURCE_DIR}=CMAKE_SOURCE_DIR)
+-  zephyr_cc_option(-fmacro-prefix-map=${ZEPHYR_BASE}=ZEPHYR_BASE)
++  # -ffile-prefix-map, not -fmacro-prefix-map: the macro variant rewrites only
++  # __FILE__, so the build's absolute paths survive in DWARF and every .elf ships
++  # them. -ffile-prefix-map implies both the macro and the debug variant, so one
++  # flag covers __ASSERT strings and debug info alike. The mappings and their
++  # order are unchanged.
++  zephyr_cc_option(-ffile-prefix-map=${CMAKE_SOURCE_DIR}=CMAKE_SOURCE_DIR)
++  zephyr_cc_option(-ffile-prefix-map=${ZEPHYR_BASE}=ZEPHYR_BASE)
+   if(WEST_TOPDIR)
+-    zephyr_cc_option(-fmacro-prefix-map=${WEST_TOPDIR}=WEST_TOPDIR)
++    zephyr_cc_option(-ffile-prefix-map=${WEST_TOPDIR}=WEST_TOPDIR)
++  endif()
++  # The toolchain's own headers are outside every mapping above, so without this
++  # the SDK install path stays in DWARF.
++  if(ZEPHYR_SDK_INSTALL_DIR)
++    zephyr_cc_option(-ffile-prefix-map=${ZEPHYR_SDK_INSTALL_DIR}=ZEPHYR_SDK)
++  endif()
++  # Applications can be built outside the workspace. Generated sources and
++  # DW_AT_comp_dir carry CMAKE_BINARY_DIR, so map it after WEST_TOPDIR too.
++  zephyr_cc_option(-ffile-prefix-map=${CMAKE_BINARY_DIR}=CMAKE_BINARY_DIR)
++  # Explicit assembler mappings are compatibility insurance: current GCC forwards
++  # -ffile-prefix-map to gas, but an older or differently configured driver need not.
++  # Keep -Wa scoped to ASM: zephyr_cc_option() also applies a supported option to C and
++  # CXX, where GCC serialises it into LTO objects and lto-wrapper warns and discards it
++  # at link time. Probe the driver as before, then attach the option only to assembly.
++  if(WEST_TOPDIR)
++    zephyr_check_compiler_flag(C "-Wa,--debug-prefix-map=${WEST_TOPDIR}=WEST_TOPDIR" zephyr_asm_debug_prefix_map)
++    if(zephyr_asm_debug_prefix_map)
++      zephyr_compile_options($<$<COMPILE_LANGUAGE:ASM>:-Wa,--debug-prefix-map=${WEST_TOPDIR}=WEST_TOPDIR>)
++    endif()
++  endif()
++  if(ZEPHYR_SDK_INSTALL_DIR)
++    zephyr_check_compiler_flag(C "-Wa,--debug-prefix-map=${ZEPHYR_SDK_INSTALL_DIR}=ZEPHYR_SDK" zephyr_asm_debug_prefix_map)
++    if(zephyr_asm_debug_prefix_map)
++      zephyr_compile_options($<$<COMPILE_LANGUAGE:ASM>:-Wa,--debug-prefix-map=${ZEPHYR_SDK_INSTALL_DIR}=ZEPHYR_SDK>)
++    endif()
++  endif()
++  zephyr_check_compiler_flag(C "-Wa,--debug-prefix-map=${CMAKE_BINARY_DIR}=CMAKE_BINARY_DIR" zephyr_asm_debug_prefix_map)
++  if(zephyr_asm_debug_prefix_map)
++    zephyr_compile_options($<$<COMPILE_LANGUAGE:ASM>:-Wa,--debug-prefix-map=${CMAKE_BINARY_DIR}=CMAKE_BINARY_DIR>)
++  endif()
++  # With LTO the compiler re-emits code at LINK time, and those synthesised units do
++  # not carry the compile-line mappings above: their DW_AT_comp_dir keeps the raw
++  # build directory. Pass the same mappings to the link so LTO codegen sees them.
++  # Guarded on CONFIG_LTO so a non-LTO build's link line is untouched.
++  if(CONFIG_LTO)
++    zephyr_link_libraries(-ffile-prefix-map=${CMAKE_SOURCE_DIR}=CMAKE_SOURCE_DIR)
++    zephyr_link_libraries(-ffile-prefix-map=${ZEPHYR_BASE}=ZEPHYR_BASE)
++    if(WEST_TOPDIR)
++      zephyr_link_libraries(-ffile-prefix-map=${WEST_TOPDIR}=WEST_TOPDIR)
++    endif()
++    if(ZEPHYR_SDK_INSTALL_DIR)
++      zephyr_link_libraries(-ffile-prefix-map=${ZEPHYR_SDK_INSTALL_DIR}=ZEPHYR_SDK)
++    endif()
++    zephyr_link_libraries(-ffile-prefix-map=${CMAKE_BINARY_DIR}=CMAKE_BINARY_DIR)
+   endif()
+ endif()
+ 
+-- 
+2.47.3
+

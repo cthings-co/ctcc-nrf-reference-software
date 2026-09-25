@@ -1,0 +1,18 @@
+/*
+ * Copyright (c) 2025 CTHINGS.CO
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+};
+
+/* Route the reset function to a GPIO so the card can be reset over the
+ * mPCIe/M.2 PERST# line. The board this repository builds against comes from the
+ * SDK (zephyr/boards/ct/ctcc) and does not set it - it is a UICR value, i.e. a
+ * per-card decision, so the reference firmware opts in here. CI additionally
+ * pushes firmware/ctcc_nrf52840_uicr.overlay into the loader image.
+ */
+&uicr {
+	gpio-as-nreset;
+};

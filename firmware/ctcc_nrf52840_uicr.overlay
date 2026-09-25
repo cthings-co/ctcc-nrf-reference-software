@@ -1,0 +1,29 @@
+/*
+ * Copyright (c) 2026 CTHINGS.CO
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * ctcc/nrf52840 UICR configuration, applied by .ci_scripts/build_sdk.sh to every
+ * image it builds for the card - the application AND the Open Bootloader.
+ *
+ * gpio-as-nreset routes the reset function to a GPIO so the card can be reset over
+ * the mPCIe/M.2 PERST# line. This is not a hex record: the property makes the MDK's
+ * SystemInit write UICR->PSELRESET and NVIC_SystemReset() once, on the first boot
+ * of an image that carries it (system_nrf52.c, via NRF_CONFIG_GPIO_AS_PINRESET).
+ * An image built without it never configures the pin.
+ *
+ * The upstream ctcc board leaves this to the application, so without this overlay
+ * a card that has only ever run the standalone Open Bootloader - a stock card
+ * waiting for its first image over serial recovery - has no PERST reset until an
+ * application has booted once.
+ *
+ * The reference application also sets the property in its own board overlay
+ * (firmware/boards/ctcc_nrf52840.overlay), which keeps a plain `west build` of
+ * firmware/ correct on its own; setting the same boolean property twice is a no-op.
+ *
+ * Not applied to the assembly test: that image is flashed over SWD for
+ * qualification and should not write UICR or reset the card under test.
+ */
+
+&uicr {
+	gpio-as-nreset;
+};

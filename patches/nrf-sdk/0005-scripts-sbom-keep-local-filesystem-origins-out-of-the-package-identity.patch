@@ -1,0 +1,101 @@
+From 5a8057cacd3b9a75b47e1325c5248ecb6cab3acd Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Mon, 21 Sep 2026 15:23:04 +0200
+Subject: [PATCH 5/5] scripts: sbom: keep local filesystem origins out of the
+ package identity
+
+west ncs-sbom builds each git package's id from its remote origin:
+
+    package_id = f'git#{git_origin}#{git_sha}'.upper()
+
+A filesystem origin is not public provenance: it says where the build machine kept a
+checkout. It can arrive as a POSIX or UNC path, a file: URL, a Windows drive path,
+or a scheme-less relative path that is not Git's scp-like [user@]host:path syntax.
+If it reaches the package id, it is printed in HTML anchors and can expose the
+machine layout in an upper-cased form that a case-sensitive search misses.
+
+Identify such a checkout by its commit alone. The SHA is what actually pins the
+source; the location says only where someone happened to keep it. Clear
+git_origin so PackageDownloadLocation is NONE, retain a commit-only package id,
+and set that id as the package name explicitly once the origin is hidden. This
+avoids relying on later presentation code to derive a safe display name from a
+URL that is no longer present.
+
+Repositories with a real remote URL, including Git's scp-like syntax, are
+untouched.
+
+No upstream change covers this.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ .../west_commands/sbom/git_info_detector.py   | 39 ++++++++++++++++++-
+ 1 file changed, 37 insertions(+), 2 deletions(-)
+
+diff --git a/scripts/west_commands/sbom/git_info_detector.py b/scripts/west_commands/sbom/git_info_detector.py
+index 07f809b50e..92366b8be0 100644
+--- a/scripts/west_commands/sbom/git_info_detector.py
++++ b/scripts/west_commands/sbom/git_info_detector.py
+@@ -127,6 +127,28 @@ def get_sha(absolute_path: Path) -> 'str|None':
+     return output if (len(output) == 40) and (error_code == 0) else None
+ 
+ 
++def is_local_origin(origin: 'str|None') -> bool:
++    '''Whether a Git origin names a local filesystem location.'''
++    if not origin:
++        return False
++    origin = origin.strip()
++    if origin.lower().startswith('file:') or origin.startswith(('/', '\\')):
++        return True
++    # Treat all drive-relative and drive-absolute forms as local, including C:repo.
++    if len(origin) >= 2 and origin[0].isalpha() and origin[1] == ':':
++        return True
++    scheme, separator, _ = origin.partition('://')
++    if separator and scheme and scheme[0].isalpha() and all(
++            char.isalnum() or char in '+-.' for char in scheme):
++        return False
++    host, separator, _ = origin.partition(':')
++    if separator and '/' not in host and '\\' not in host:
++        # This is Git's scp-like [user@]host:path syntax.
++        return False
++    # A scheme-less value which is not scp-like is a relative filesystem path.
++    return True
++
++
+ def get_toplevel(absolute_path: Path) -> 'Path|None':
+     ''' Returns the root directory of the git repository containing the path. '''
+     output, error_code = command_execute(args.git, 'rev-parse', '--show-toplevel',
+@@ -150,8 +172,18 @@ def detect_dir(func_args: 'tuple[list[FileInfo],Data]') -> None:
+     git_sha = get_sha(absolute_path)
+     module_root = get_toplevel(absolute_path)
+     git_origin = get_origin(absolute_path, relative_path)
+-    if (git_sha is not None) and (git_origin is not None):
+-        package_id = f'git#{git_origin}#{git_sha}'.upper()
++    # A filesystem origin is not public provenance: it names the machine that built this.
++    # That includes file: URLs, POSIX/UNC and Windows paths, and a scheme-less value that
++    # is not Git's scp-like [user@]host:path syntax. Left in git_origin it reaches
++    # PackageDownloadLocation, the package id, and HTML anchors built from that id, in an
++    # upper-cased copy that a case-sensitive search for the original path will not find.
++    # Identify such a checkout by its commit alone, which is what actually pins the source.
++    local_origin = is_local_origin(git_origin)
++    if local_origin:
++        git_origin = None
++    if (git_sha is not None) and ((git_origin is not None) or local_origin):
++        package_id = (f'git#{git_origin}#{git_sha}' if git_origin is not None
++                      else f'git#{git_sha}').upper()
+         output, error_code = command_execute(args.git, 'status', '--porcelain', '--ignored',
+                                              '--untracked-files=all', '*', cwd=absolute_path,
+                                              return_error_code=True, allow_stderr=True)
+@@ -172,6 +204,9 @@ def detect_dir(func_args: 'tuple[list[FileInfo],Data]') -> None:
+         package.id = package_id
+         package.url = git_origin
+         package.version = git_sha
++        if local_origin:
++            # With the origin hidden, provide the commit-only display name explicitly.
++            package.name = package_id
+         package.root_path = module_root
+         if git_origin and git_sha:
+             package.purl = git_url_to_purl(git_origin, git_sha)
+-- 
+2.47.3
+

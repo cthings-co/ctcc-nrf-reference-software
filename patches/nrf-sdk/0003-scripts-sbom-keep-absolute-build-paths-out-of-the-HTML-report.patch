@@ -1,0 +1,90 @@
+From 1f0f7b615f3749e48d25b48d07625a5e704c73c9 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 18 Sep 2026 13:56:49 +0200
+Subject: [PATCH 3/5] scripts: sbom: keep absolute build paths out of the HTML
+ report
+
+The HTML report listed every file as an absolute path inside a file:/// link:
+
+    <a href="file:///{{file_info.file_path|e}}">{{file_info.file_path|e}}</a>
+
+so each .sbom.html shipped the build machine's full directory layout - 2231
+occurrences of the workspace root and the toolchain path in one nRF91 report.
+The SPDX half is now package-relative, but this half was still absolute, and CI
+publishes both.
+
+No upstream change covers this: nrfconnect/sdk-nrf#30566 makes SPDX FileName
+relative to the package root and does not touch report.html.jinja.
+
+- Print the same package-relative name the SPDX output uses. The clickable
+  file:/// link goes with it; it only ever resolved on the machine that did the
+  build, and it is what carried the path.
+- Show a package by name when it has no url, rather than "Repository: Unknown".
+  The toolchain package has a name and, since the previous patch, deliberately
+  no url.
+- Print NOASSERTION in the per-package URL paragraph when there is no url,
+  rather than letting Jinja render None as the literal string "None". That
+  paragraph is separate from the heading above it and needs its own guard; the
+  SPDX half already emits NONE for the same package.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+---
+ .../west_commands/sbom/templates/report.html.jinja   | 12 +++++++-----
+ 1 file changed, 7 insertions(+), 5 deletions(-)
+
+diff --git a/scripts/west_commands/sbom/templates/report.html.jinja b/scripts/west_commands/sbom/templates/report.html.jinja
+index 0e77c6c29b..3097df8481 100644
+--- a/scripts/west_commands/sbom/templates/report.html.jinja
++++ b/scripts/west_commands/sbom/templates/report.html.jinja
+@@ -288,7 +288,7 @@
+ {% for package_id in packages_sorted -%}
+ {% if package_id in files_by_package_and_license -%}
+ <div class="package" id="package#{{package_id|e}}#{{license|e}}">Repository:
+-{%- if packages[package_id].url %} <a href="#package#{{package_id|e}}">{{packages[package_id].name if packages[package_id].name else packages[package_id].url|e}}</a>
++{%- if packages[package_id].name or packages[package_id].url %} <a href="#package#{{package_id|e}}">{{packages[package_id].name if packages[package_id].name else packages[package_id].url|e}}</a>
+ {% else %} Unknown
+ {% endif -%}
+ Version:
+@@ -297,7 +297,7 @@ Version:
+ {%- endif -%}
+ </div>
+ {%- for file_info in files_by_package_and_license[package_id] -%}
+-<a href="file:///{{file_info.file_path|e}}" class="fa">{{file_info.file_path|e}}</a>
++<span class="fa">{{func.spdx_file_name(file_info)|e}}</span>
+ {%- if file_info.local_modifications %} <span class="modifications">with local modifications</span>{%- endif %}
+ {% endfor -%}
+ {% endif -%}
+@@ -359,7 +359,7 @@ Version:
+ {% for package_id in packages_sorted -%}
+ {% if package_id in files_by_package_and_license -%}
+ <div class="package" id="package#{{package_id|e}}#{{license|e}}">Repository:
+-{%- if packages[package_id].url %} <a href="#package#{{package_id|e}}">{{packages[package_id].name if packages[package_id].name else packages[package_id].url|e}}</a>
++{%- if packages[package_id].name or packages[package_id].url %} <a href="#package#{{package_id|e}}">{{packages[package_id].name if packages[package_id].name else packages[package_id].url|e}}</a>
+ {% else %} Unknown
+ {% endif -%}
+ Version:
+@@ -368,7 +368,7 @@ Version:
+ {%- endif -%}
+ </div>
+ {%- for file_info in files_by_package_and_license[package_id] -%}
+-<a href="file:///{{file_info.file_path|e}}" class="fa">{{file_info.file_path|e}}</a>
++<span class="fa">{{func.spdx_file_name(file_info)|e}}</span>
+ {%- if file_info.local_modifications %} <span class="modifications">with local modifications</span>{%- endif %}
+ {% endfor -%}
+ {% endif -%}
+@@ -405,8 +405,10 @@ Version:
+ 	<p>URL:
+ 	{% if packages[package_id].browser_url %}
+ 	<a href="{{packages[package_id].browser_url|e}}">{{packages[package_id].url|e}}</a>
+-	{% else %}
++	{% elif packages[package_id].url %}
+ 	{{packages[package_id].url|e}}
++	{% else %}
++	NOASSERTION
+ 	{% endif %}
+ 	</p>
+ 	<p>The files from this source are covered by the following licenses:</p>
+-- 
+2.47.3
+

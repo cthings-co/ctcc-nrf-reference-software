@@ -1,0 +1,49 @@
+From 7a37c05b0110bbf405f83c66258cefcb9419c529 Mon Sep 17 00:00:00 2001
+From: Adam Szewczyk <a.szewczyk@cthings.co>
+Date: Fri, 18 Sep 2026 13:47:35 +0200
+Subject: [PATCH 2/5] scripts: sbom: do not put the local toolchain path in
+ PackageDownloadLocation
+
+Cherry-pick of one hunk from upstream nrfconnect/sdk-nrf#31393 ("scripts: sbom:
+Update report to SPDX 2.3"), which is still a draft backport against
+v3.4-branch. Only the toolchain hunk is taken here; the rest of that series
+reshapes the SPDX output in ways this branch does not need.
+
+register_toolchain_for_build() set the toolchain package's url to the resolved
+install directory, and the SPDX template emits that as
+
+    PackageDownloadLocation: /opt/toolchains/zephyr-sdk-0.17.4
+
+A local filesystem path is not a download location - it tells a consumer
+nothing and publishes where the build machine keeps its toolchain. With url
+unset the template emits NONE, which is what SPDX expects when there is no
+download location to give.
+
+output_pre_process() skips a package whose url is None before it would
+dereference it, and the toolchain package already sets package.name, so the
+h2 heading in the HTML report - "name if name else url" - still names it. The
+URL paragraph below that heading prints package.url unguarded and would render
+the literal "None"; the next patch guards it.
+
+Assisted-by: Claude:claude-opus-5 / Codex:gpt-5
+Signed-off-by: Adam Szewczyk <a.szewczyk@cthings.co>
+Upstream-Status: Partial backport [https://github.com/nrfconnect/sdk-nrf/commit/ad6eefca5fdd1cde673efc23077d1ce010be083d]
+---
+ scripts/west_commands/sbom/input_build.py | 1 -
+ 1 file changed, 1 deletion(-)
+
+diff --git a/scripts/west_commands/sbom/input_build.py b/scripts/west_commands/sbom/input_build.py
+index b162a17eb2..6b2b2e1baf 100644
+--- a/scripts/west_commands/sbom/input_build.py
++++ b/scripts/west_commands/sbom/input_build.py
+@@ -267,7 +267,6 @@ def register_toolchain_for_build(data: Data, build_dir: Path):
+     pkg_version = version or detect_toolchain_version(resolved) or 'UNKNOWN'
+     package.id = f'TOOLCHAIN#{pkg_name.upper()}#{pkg_version.upper()}'
+     package.name = pkg_name
+-    package.url = str(resolved)
+     package.version = pkg_version
+     package.root_path = resolved
+     if args.package_supplier:
+-- 
+2.47.3
+
